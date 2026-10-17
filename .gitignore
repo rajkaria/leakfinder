@@ -8,13 +8,6 @@ skills/*
 !skills/.gitkeep
 .burn-rate/
 
-.projects/cache
-.projects/vault
-.projects/state.test.json
-.projects/state.local.test.json
-.env
-.env.*
-!.env.example
 
 # Written by `stripe projects init` for coding agents; not part of the app.
 .claude/
@@ -23,3 +16,11 @@ skills/*
 .cursorignore
 CLAUDE.md
 AGENTS.md
+
+.projects/cache
+.projects/vault
+.projects/state.test.json
+.projects/state.local.test.json
+.env
+.env.*
+!.env.example
