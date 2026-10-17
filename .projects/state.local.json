@@ -1,0 +1,83 @@
+{
+  "version": 4,
+  "project": {
+    "catalog": "prod",
+    "initializedAt": "2026-10-17T21:22:32.855Z",
+    "merchantDisplayName": null,
+    "merchantId": "acct_1UFGRKRoS0EkgX9J",
+    "projectId": "project_61Vb3166ZCLOnEV8a16VOeOhUhSQQjbT2U7xsfUKmCUS",
+    "projectName": "leakfinder"
+  },
+  "providers": {
+    "createos": {
+      "accountRequestId": "facctrq_61Vb32EHhls3Jtkgp16VOeOhUhSQQjbT2U7xsfUKmGAq",
+      "configuration": {},
+      "linkedAt": "2026-10-17T21:23:44.432Z",
+      "providerId": "prvdr_61V0eGC6sUPXoATb051se",
+      "providerName": "createos",
+      "redirectUrl": null,
+      "requestedAt": "2026-10-17T21:23:44.431Z",
+      "status": "complete"
+    },
+    "neon": {
+      "accountRequestId": "fprvcnn_61Vb350kEmfEAqJxF16VOeOhUhSQQjbT2U7xsfUKmMCu",
+      "configuration": {},
+      "linkedAt": "2026-10-17T21:26:34.403Z",
+      "providerId": "prvdr_61UH8uNXFdoJUJOtT54AC",
+      "providerName": "Neon",
+      "redirectUrl": null,
+      "requestedAt": "2026-10-17T21:26:34.403Z",
+      "status": "complete"
+    }
+  },
+  "resources": {
+    "createos-plan": {
+      "configuration": {},
+      "createdAt": "2026-10-17T21:23:46.653Z",
+      "lastRevealedAt": "2026-10-17T21:23:47.407Z",
+      "lastStatus": "complete",
+      "livemode": true,
+      "name": "createos-plan",
+      "providerId": "prvdr_61V0eGC6sUPXoATb051se",
+      "providerName": "createos",
+      "resourceId": "fres_61Vb32H8VLdQxMevJ16VOeOhUhSQQjbT2U7xsfUKmTxg",
+      "serviceId": "free"
+    },
+    "createos-project": {
+      "configuration": {},
+      "createdAt": "2026-10-17T21:23:50.393Z",
+      "lastRevealedAt": "2026-10-17T21:23:51.015Z",
+      "lastStatus": "complete",
+      "livemode": true,
+      "name": "createos-project",
+      "providerId": "prvdr_61V0eGC6sUPXoATb051se",
+      "providerName": "createos",
+      "resourceId": "fres_61Vb32KF883vAUioB16VOeOhUhSQQjbT2U7xsfUKmM36",
+      "serviceId": "project"
+    },
+    "neon-plan": {
+      "configuration": {},
+      "createdAt": "2026-10-17T21:42:03.244Z",
+      "lastRevealedAt": "2026-10-17T21:42:04.782Z",
+      "lastStatus": "complete",
+      "livemode": true,
+      "name": "neon-plan",
+      "providerId": "prvdr_61UH8uNXFdoJUJOtT54AC",
+      "providerName": "Neon",
+      "resourceId": "fres_61Vb3JyjOoOh9UMv116VOeOhUhSQQjbT2U7xsfUKmP2W",
+      "serviceId": "free"
+    },
+    "neon-postgres": {
+      "configuration": {},
+      "createdAt": "2026-10-17T21:42:07.509Z",
+      "lastRevealedAt": "2026-10-17T21:42:08.351Z",
+      "lastStatus": "complete",
+      "livemode": true,
+      "name": "neon-postgres",
+      "providerId": "prvdr_61UH8uNXFdoJUJOtT54AC",
+      "providerName": "Neon",
+      "resourceId": "fres_61Vb3K2y47F27Ntmx16VOeOhUhSQQjbT2U7xsfUKmOwi",
+      "serviceId": "postgres"
+    }
+  }
+}
