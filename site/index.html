@@ -228,6 +228,7 @@ td.m{color:var(--muted)}
 @media (min-width:760px){.real{grid-template-columns:repeat(2,1fr)}}
 .real li{display:flex;gap:12px;align-items:flex-start;padding:16px 18px;border-radius:14px;border:1px solid var(--line);background:var(--surface);font-size:15.5px}
 .real li svg{flex:none;margin-top:3px;color:var(--muted)}
+.real li.ran svg{color:var(--ok)}
 
 /* Footer */
 .foot{border-top:1px solid var(--line);padding:32px 0 48px;display:flex;flex-wrap:wrap;gap:16px 28px;align-items:center;justify-content:space-between;font-size:14px;color:var(--muted)}
@@ -272,7 +273,7 @@ td.m{color:var(--muted)}
           </a>
           <a class="btn btn-ghost" href="#how">How it works</a>
         </div>
-        <p class="note">Until the package is on npm, run it from the repo. The README has the steps.</p>
+        <p class="note">Until the package is on npm, run it from the repo. The README has the steps. What has run live so far is listed under <a href="#status">Status</a>.</p>
       </div>
 
       <figure class="key" aria-label="What the seed plants in the demo dataset">
@@ -322,7 +323,7 @@ td.m{color:var(--muted)}
 <pre class="term" aria-label="Transcript check"><span class="c"># an email from the report</span>
 <span class="p">$ </span>grep -c "&lt;email&gt;" transcript.jsonl
 <span class="z">0</span></pre>
-            <p class="cap">The live demo runs this check with the email the seed plants.</p>
+            <p class="cap">The demo will run this check with an email the seed plants.</p>
           </div>
         </article>
 
@@ -330,12 +331,12 @@ td.m{color:var(--muted)}
           <div>
             <span class="num">3</span>
             <h3>Apply closes the leak, in Stripe test mode.</h3>
-            <p>The agent writes the fix script too. It dry-runs first and prints a plan with counts. <b>A person presses Apply:</b> invoices out, refunds issued, access revoked, rows synced.</p>
-            <p>Then a separate program reads Stripe and Postgres directly, without the agent, and reads zero. Apply runs with a Stripe test key only. Invoices are sent, not collected.</p>
+            <p>The agent writes the fix script too. It dry-runs first and prints a plan with counts. <b>Nothing changes until a person approves it:</b> invoices out, refunds issued, access revoked, rows synced.</p>
+            <p>Then a separate program reads Stripe and Postgres directly, without the agent. After the agent's fix ran from the host in test mode, it read zero. Apply runs with a Stripe test key only. Invoices are sent, not collected.</p>
           </div>
           <ol class="steps" aria-label="Apply flow">
             <li><span class="k">Dry run</span><span class="t">A plan with counts</span><span class="d">Nothing changes in Stripe or the database.</span></li>
-            <li><span class="k">Apply</span><span class="t">Invoices, refunds, revokes, syncs</span><span class="d">In Stripe test mode, after a person clicks.</span></li>
+            <li><span class="k">Apply</span><span class="t">Invoices, refunds, revokes, syncs</span><span class="d">In Stripe test mode, after a person approves.</span></li>
             <li class="zero"><span class="k">Verify</span><span class="t">Zero, zero, zero</span><span class="d"><code>pnpm verify:starter</code> counts the drift again from Stripe and Postgres.</span></li>
           </ol>
         </article>
@@ -537,7 +538,7 @@ td.m{color:var(--muted)}
         <div class="tile"><b>CreateOS Sandbox</b><span>The micro-VM where the agent's code runs, with an egress allowlist.</span></div>
         <div class="tile"><b>Stripe API, test mode</b><span>Reads every subscription. Apply sends invoices, refunds and cancellations.</span></div>
         <div class="tile"><b>Neon Postgres via Stripe Projects</b><span>The app's database: users, teams and the plan each team is on.</span></div>
-        <div class="tile"><b>DeepSeek or Claude</b><span>The model writes the Python and rewrites it when a query fails. The demo runs on DeepSeek.</span></div>
+        <div class="tile"><b>DeepSeek</b><span>The model writes the Python and rewrites it when a query fails. A Claude provider is in the code but has not been run live.</span></div>
       </div>
     </section>
 
@@ -546,6 +547,11 @@ td.m{color:var(--muted)}
       <h2 id="status-title">What is real today</h2>
       <ul class="real">
         <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>A prototype, built in one day at the CreateOS × Stripe Projects hackathon.</span></li>
+        <li class="ran"><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6.4 10.3l2.5 2.5 4.7-5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Run live: the agent loop on DeepSeek against the seeded Neon database and Stripe in test mode, with its Python run on the host, not in the sandbox. It found the planted 12, 3 and 5 rows and the $348 a month, run after run.</span></li>
+        <li class="ran"><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6.4 10.3l2.5 2.5 4.7-5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Run live: the agent's fix script, applied from the host in Stripe test mode. <code>pnpm verify:starter</code> then read 0, 0, 0, and a second apply changed nothing.</span></li>
+        <li class="ran"><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6.4 10.3l2.5 2.5 4.7-5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Run live: a CreateOS sandbox with the egress allowlist. A probe to a host outside the list got no answer, and the report it served answered 200 with its token and 403 without.</span></li>
+        <!-- After the first full run in the sandbox, rewrite this item as "Run live". -->
+        <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Not run live yet: the full audit inside the CreateOS sandbox, and Apply from there or from the report's Apply button.</span></li>
         <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>The schema is nextjs/saas-starter's, unmodified. The 252 users and the drift are planted by our seed. There are no customers.</span></li>
         <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Built for two schemas in this repo: nextjs/saas-starter's and a users, subscriptions and entitlements one. No others tested.</span></li>
         <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Money moves in Stripe test mode only.</span></li>

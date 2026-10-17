@@ -2,3 +2,5 @@ Dockerfile
 nginx.conf
 DEPLOY.md
 .createos.json
+.env*
+.vercel
