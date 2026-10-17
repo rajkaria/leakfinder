@@ -29,10 +29,10 @@ LeakFinder reads your schema, writes Python that reconciles it with every Stripe
 ## How it works
 
 1. `stripe projects` provisions the stack from the terminal: CreateOS and a Postgres database, with credentials written to `.env` *(verify live)*.
-2. LeakFinder opens one CreateOS micro-VM with the outbound allowlist set at create time: `api.stripe.com`, the database's IPv4 addresses on its port, and the VM's DNS resolver. Before any model-written code runs, LeakFinder tests the lock from inside: `example.com` gets no answer and `api.stripe.com` does.
+2. LeakFinder opens one CreateOS micro-VM with the outbound allowlist set at create time: `api.stripe.com`, the database's IPv4 addresses on its port, and the VM's DNS resolver. Before any model-written code runs, LeakFinder tests the lock from inside: `example.com` and `pypi.org` get no answer and `api.stripe.com` does. The rules are final from the first packet, and the two Python libraries arrive as wheels built on your machine, so the VM never talks to PyPI.
 3. The model writes Python for your schema, the VM runs it, and only the exit code, counts and error text go back, with email addresses removed. A failing script is rewritten, up to eight turns. A working script is saved for that schema, so the next run on it needs no model turns.
 4. Findings are written to a file inside the VM. The report is built from that file.
-5. The model writes a fix script. It runs first with `APPLY` off, which prints a plan and changes nothing, in a fork of the VM when your plan allows forks. The script refuses to act with anything but a Stripe test-mode key, and the CLI and the VM server check that too.
+5. The model writes a fix script. It runs first with `APPLY` off, which prints a plan and changes nothing (in a fork of the VM with `pnpm apply --fork` on a paid CreateOS plan). The script refuses to act with anything but a Stripe test-mode key, and the CLI and the VM server check that too.
 6. The report is served from inside the sandbox over its public HTTPS URL, behind a random token *(verify live)*. Its **Dry run** and **Apply in test mode** buttons call the VM's own server. Apply runs once per sandbox.
 
 ## Run it
@@ -75,7 +75,7 @@ pnpm test        # guard, transcript, loop, report escaping, seed rules, VM serv
 - **Real:** the agent loop, the CreateOS sandbox and its egress rules, the Stripe test API, the transcript and the grep, the report served from the sandbox *(verify live)*.
 - **Demo data:** every user, team, subscription and the drift itself is seeded by this repo. The main schema is nextjs/saas-starter's, unmodified; the second follows the users/customers/products/prices/subscriptions shape of Vercel's Supabase billing starter, plus an `entitlements` table.
 - **Not claimed:** real money (test mode only); collected payments (invoices are sent, not paid); schemas beyond the two in this repo; that every personal field is caught (email addresses are removed; the prompt keeps other fields out).
-- **Known gaps:** DNS lookups to the VM's resolver are allowed, so a hostile script could leak data through DNS queries. The database credential is the app's own; a read-only role would be safer for the audit. Forking the VM for the dry run needs the CreateOS Beginner plan; on Free the dry run runs in the original VM, which is safe because `APPLY` is off.
+- **Known gaps:** DNS lookups to the VM's resolver are allowed, so a hostile script could leak data through DNS queries. The database credential is the app's own; a read-only role would be safer for the audit. Forking the VM for the dry run needs a paid CreateOS plan; by default the dry run runs in the same VM, which is safe because `APPLY` is off.
 
 ## Layout
 

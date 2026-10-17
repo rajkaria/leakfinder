@@ -38,7 +38,7 @@ export function provider(vars: NodeJS.ProcessEnv = process.env): Provider {
 }
 
 const MODEL_KEY: Record<Provider, string> = { anthropic: "ANTHROPIC_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
-const DEFAULT_MODEL: Record<Provider, string> = { anthropic: "claude-sonnet-5-5", deepseek: "deepseek-chat" };
+const DEFAULT_MODEL: Record<Provider, string> = { anthropic: "claude-sonnet-5-5", deepseek: "deepseek-v4-pro" };
 
 /** The credentials this run needs: the three data and sandbox keys, plus the active provider's model key. */
 export function requiredCredentials(): string[] {

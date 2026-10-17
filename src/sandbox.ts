@@ -10,7 +10,10 @@
  * - IP rules apply at once, hostname rules take about 30 s to propagate, so
  *   the Stripe side of `sealCheck` polls instead of trusting one probe.
  */
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { promises as dns } from "node:dns";
 import { isIP } from "node:net";
 import {
@@ -34,8 +37,9 @@ export const FORK_NEEDS_PLAN =
 const STRIPE_HOST = "api.stripe.com";
 const STRIPE_PROBE = "https://api.stripe.com/v1/charges";
 const BLOCKED_PROBE = "https://example.com";
+/** PyPI must be shut too: the libraries come in as wheels from this machine, never over the VM's network. */
+const PYPI_PROBE = "https://pypi.org/simple/";
 const FALLBACK_DNS = "1.1.1.1";
-const INSTALL_HOSTS = ["pypi.org", "files.pythonhosted.org"];
 /** Hostname rules take ~30 s to propagate; leave headroom over that. */
 const SEAL_BUDGET_MS = 40_000;
 const HOME = `${WORKDIR}/.leakfinder`;
@@ -199,7 +203,9 @@ export class SealedRoom {
             // libpq and psycopg default to a ~2 minute connect wait per address; a blocked address should fail a turn fast.
             PGCONNECT_TIMEOUT: "15",
           },
-          egress: [...initial, ...INSTALL_HOSTS],
+          // The final shape from the first packet. A host the VM has already talked to stays reachable after
+          // setEgress tightens the list (seen live with PyPI), so nothing is allowed now that is cut later.
+          egress: initial,
           ingress_enabled: opts.ingress ?? false,
         },
         { timeoutMs: 180_000 },
@@ -207,7 +213,7 @@ export class SealedRoom {
     } catch (e) {
       throw await explainCreate(e);
     }
-    const room = new SealedRoom(box, [...initial, ...INSTALL_HOSTS]);
+    const room = new SealedRoom(box, initial);
     try {
       await room.exec(`mkdir -p ${HOME}`);
       const probe = await room.probeEnv(db.host);
@@ -218,14 +224,7 @@ export class SealedRoom {
         dbPort: db.port,
         dnsIps: probe.resolvers.length ? probe.resolvers : [FALLBACK_DNS],
       });
-      if (!probe.libs) {
-        await room.applyRules([...sealed, ...INSTALL_HOSTS]);
-        // Also pin PyPI by the addresses the VM resolves (IP rules apply at once), in case its CDN answers the VM
-        // with addresses the hostname rule does not cover; both go away when the room is sealed below.
-        const pypiIps = await room.resolveInVm(INSTALL_HOSTS);
-        if (pypiIps.length) await room.applyRules(uniq([...sealed, ...INSTALL_HOSTS, ...pypiIps.map((ip) => `${ip}:443`)]));
-        await room.installLibraries();
-      }
+      if (!probe.libs) await room.installLibraries(probe.python);
       await room.applyRules(sealed);
       return room;
     } catch (e) {
@@ -465,11 +464,18 @@ echo "report server did not answer on 127.0.0.1:${REPORT_PORT}"; tail -n 20 ${HO
     }
   }
 
-  /** Only runs while PyPI is still on the allowlist. pip retries cover hostname-rule propagation. */
-  private async installLibraries(): Promise<void> {
+  /**
+   * The VM never reaches PyPI. Wheels for its Python are downloaded on this
+   * machine once (cached in ~/.cache/leakfinder), uploaded as one tarball and
+   * installed with --no-index.
+   */
+  private async installLibraries(python: string): Promise<void> {
+    const tgz = hostWheels(python);
+    await this.box.files.upload("/tmp/lf-wheels.tgz", new Blob([readFileSync(tgz)]));
     // -U: an old preinstalled stripe satisfies a bare install and would stay.
-    const pip = `python3 -m pip install -q -U --disable-pip-version-check --retries 8 --timeout 15 stripe "psycopg[binary]"`;
-    const r = await this.exec(`(${pip} || ${pip} --break-system-packages) 2>&1 | tail -n 5; exit \${PIPESTATUS[0]}`, 300_000);
+    const pip = `python3 -m pip install -q -U --disable-pip-version-check --no-index --find-links /tmp/lf-wheels stripe "psycopg[binary]"`;
+    const unpack = `mkdir -p /tmp/lf-wheels && tar xzf /tmp/lf-wheels.tgz -C /tmp/lf-wheels`;
+    const r = await this.exec(`${unpack} && (${pip} || ${pip} --break-system-packages) 2>&1 | tail -n 5; exit \${PIPESTATUS[0]}`, 300_000);
     const check = await this.exec(`python3 -c "import stripe, psycopg; stripe.InvoicePayment; print('ok')"`, 60_000);
     if (!check.stdout.includes("ok")) {
       throw new Error(`pip install of stripe and psycopg failed (exit ${r.exit_code}): ${(r.stdout + r.stderr).trim()}`);
@@ -487,7 +493,9 @@ echo "report server did not answer on 127.0.0.1:${REPORT_PORT}"; tail -n 20 ${HO
   private async probeSeal(budgetMs: number): Promise<SealCheck> {
     const started = Date.now();
     const outside = await this.httpProbe(BLOCKED_PROBE, 3);
-    const sealed = outside.ran && outside.code === 0;
+    const pypi = await this.httpProbe(PYPI_PROBE, 3);
+    // Only "no HTTP answer at all" counts as blocked.
+    const sealed = outside.ran && outside.code === 0 && pypi.ran && pypi.code === 0;
     let stripe = await this.httpProbe(STRIPE_PROBE, 4);
     // Waiting only helps the Stripe side; a host that answered the outside probe is not going to stop.
     while (sealed && stripe.code === 0 && Date.now() - started < budgetMs) {
@@ -499,10 +507,11 @@ echo "report server did not answer on 127.0.0.1:${REPORT_PORT}"; tail -n 20 ${HO
       : sealed
         ? `example.com → blocked in ${outside.secs.toFixed(1)}s`
         : `example.com → ${outside.code} (NOT sealed)`;
+    const mid = !pypi.ran ? "pypi.org → probe did not run" : pypi.code === 0 ? "pypi.org → blocked" : `pypi.org → ${pypi.code} (NOT sealed)`;
     const right = stripe.code
       ? `api.stripe.com → ${stripe.code}`
       : `api.stripe.com → unreachable after ${Math.round((Date.now() - started) / 1000)}s`;
-    return { sealed, stripeReachable: stripe.code > 0, detail: `${left} · ${right}` };
+    return { sealed, stripeReachable: stripe.code > 0, detail: `${left} · ${mid} · ${right}` };
   }
 
   /** Lenient: true once Stripe answers, false when the budget runs out. */
@@ -600,4 +609,25 @@ async function explainCreate(e: unknown): Promise<Error> {
       : // Nothing is holding a slot, so it is the other cap: creates per rolling 24 h, destroyed sandboxes included.
         `CreateOS refused a new sandbox and none is running: likely the daily cap (Free = 10 per rolling 24 h, destroyed ones count). ${e instanceof Error ? e.message : ""}`.trim(),
   );
+}
+
+/**
+ * A tarball of stripe + psycopg wheels for the VM's CPython (x86_64 glibc
+ * Linux), built on this machine with `pip download` and cached per Python
+ * version, so a sealed room installs them with no network at all.
+ */
+export function hostWheels(python: string): string {
+  const ver = (python.match(/^(\d+)\.(\d+)/) ?? [])[0] ?? "3.13";
+  const dir = join(homedir(), ".cache", "leakfinder");
+  const out = join(dir, `wheels-cp${ver.replace(".", "")}-x86_64.tgz`);
+  if (existsSync(out)) return out;
+  mkdirSync(dir, { recursive: true });
+  const tmp = mkdtempSync(join(tmpdir(), "lf-wheels-"));
+  const platforms = ["manylinux_2_39_x86_64", "manylinux_2_28_x86_64", "manylinux_2_17_x86_64", "manylinux2014_x86_64", "manylinux_2_5_x86_64", "manylinux1_x86_64"];
+  const args = ["-m", "pip", "download", "-q", "--disable-pip-version-check", "-d", tmp, "--python-version", ver, "--implementation", "cp", "--only-binary=:all:", ...platforms.flatMap((p) => ["--platform", p]), "stripe", "psycopg[binary]"];
+  const dl = spawnSync("python3", args, { encoding: "utf8", timeout: 180_000 });
+  if (dl.status !== 0) throw new Error(`could not download wheels for Python ${ver} on this machine (python3 -m pip download): ${(dl.stderr || dl.stdout || String(dl.error ?? "")).trim().slice(-400)}`);
+  const tar = spawnSync("tar", ["czf", out, "-C", tmp, "."], { encoding: "utf8" });
+  if (tar.status !== 0) throw new Error(`could not pack wheels: ${tar.stderr.trim()}`);
+  return out;
 }

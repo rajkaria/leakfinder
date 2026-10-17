@@ -335,9 +335,10 @@ async function apply() {
     applied = prior;
   } else {
     let fork: Room | null = null;
-    if (flag("--no-fork")) {
-      // On Free the fork always fails after a full pause and resume of the room; skip straight to the fallback.
-      log("--no-fork: dry run in the original; APPLY=0 changes nothing");
+    if (!flag("--fork")) {
+      // The default: on Free a fork always fails (a paused source still holds the one concurrent slot), after a
+      // full pause and resume of the room. APPLY=0 changes nothing, so the original is a safe place for the dry run.
+      log("dry run in the same sandbox; APPLY=0 changes nothing (--fork to dry-run in a copy on a paid plan)");
     } else {
       try {
         log(`forking ${room.id}: the dry run happens in a copy, the original stays untouched`);
@@ -451,6 +452,14 @@ async function doctor() {
   }
   log(`${"Stripe key mode".padEnd(26)} ${/^(sk|rk)_test_/.test(env.stripeKey()) ? green("test mode") : red("not a test key: apply will refuse")}`);
   log(`${"model".padEnd(26)} ${env.model()} (${env.provider()})`);
+  if (env.provider() === "deepseek") {
+    // Free call: an account only serves the models it lists, and any other name fails every turn with a 400.
+    const res = await fetch(`${env.deepseekBaseUrl()}/models`, { headers: { authorization: `Bearer ${env.deepseekKey()}` }, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+    const listed: string[] = res?.ok ? ((await res.json().catch(() => null))?.data ?? []).map((m: any) => String(m?.id)) : [];
+    if (!res?.ok) log(yellow(`could not list DeepSeek models (${res ? res.status : "no answer"})`));
+    else if (!listed.includes(env.model())) throw new UserError(`DeepSeek does not serve ${env.model()} on this key; set LEAKFINDER_MODEL to one of: ${listed.join(", ")}`);
+    else log(`${"model on this key".padEnd(26)} ${green("listed")} ${dim(`(${listed.join(", ")})`)}`);
+  }
   const expected = loadExpected();
   log(`${"seed answer key".padEnd(26)} ${expected ? "seed/expected.json" : dim("none yet (pnpm seed)")}`);
 
@@ -492,7 +501,7 @@ async function down() {
 const COMMANDS: Record<string, [() => Promise<void>, string]> = {
   doctor: [doctor, "check credentials, open a sealed sandbox, prove the seal, destroy it"],
   audit: [() => audit(false), "the agent audits your schema in a sealed sandbox [--fresh]"],
-  apply: [apply, "dry run fix.py in a fork; --yes applies it in Stripe test mode [--no-fork on Free]"],
+  apply: [apply, "dry run fix.py (APPLY=0); --yes applies it in Stripe test mode [--fork: dry run in a copy, paid plans]"],
   serve: [serve, "re-serve the last report from its sandbox"],
   report: [report, "re-render the last report locally from findings.json"],
   demo: [() => audit(true), "audit, then print the report URL big"],
