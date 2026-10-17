@@ -24,3 +24,6 @@ AGENTS.md
 .env
 .env.*
 !.env.example
+
+# Session context for coding agents (local only)
+docs/context/
