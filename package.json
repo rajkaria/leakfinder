@@ -1,0 +1,27 @@
+{
+  "name": "leakfinder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Finds the money leaking between Stripe and your database. The agent writes the queries, runs them in a sealed CreateOS sandbox, and the model never sees a customer row.",
+  "scripts": {
+    "seed": "tsx src/seed.ts",
+    "audit": "tsx src/cli.ts audit",
+    "apply": "tsx src/cli.ts apply",
+    "doctor": "tsx src/cli.ts doctor",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
+    "@nodeops-createos/sandbox": "^0.8.2",
+    "dotenv": "^18.0.8",
+    "pg": "^8.23.1",
+    "stripe": "^23.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.18.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
