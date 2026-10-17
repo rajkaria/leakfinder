@@ -169,3 +169,36 @@ test("Coder turns a refusal into a clear error instead of an empty script", asyn
   });
   await assert.rejects(c.ask("hi"), /declined.*cyber/);
 });
+
+test("deepseekCreate maps an Anthropic-shaped request to chat completions and back", async () => {
+  const { deepseekCreate } = await import("../src/llm.js");
+  const prev = { fetch: globalThis.fetch, key: process.env.DEEPSEEK_API_KEY };
+  process.env.DEEPSEEK_API_KEY = "test-key";
+  let sent: any = null;
+  globalThis.fetch = (async (_url: string, init: any) => {
+    sent = JSON.parse(init.body);
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: "ok\n```python\nprint(1)\n```" }, finish_reason: "stop" }], usage: { prompt_tokens: 120, completion_tokens: 9, prompt_cache_hit_tokens: 100 } }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+  try {
+    const res: any = await deepseekCreate({
+      model: "deepseek-chat",
+      max_tokens: 16_000,
+      system: [{ type: "text", text: "SYS" }],
+      messages: [{ role: "user", content: "hi" }],
+    } as any);
+    assert.equal(sent.messages[0].role, "system");
+    assert.equal(sent.messages[0].content, "SYS");
+    assert.equal(sent.messages[1].content, "hi");
+    assert.equal(sent.max_tokens, 8_192);
+    assert.equal(res.content[0].text.includes("print(1)"), true);
+    assert.equal(res.stop_reason, "end_turn");
+    assert.deepEqual([res.usage.input_tokens, res.usage.cache_read_input_tokens, res.usage.output_tokens], [20, 100, 9]);
+  } finally {
+    globalThis.fetch = prev.fetch;
+    if (prev.key === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = prev.key;
+  }
+});

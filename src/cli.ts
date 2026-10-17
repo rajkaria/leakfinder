@@ -434,7 +434,8 @@ async function doctor() {
   title("doctor", "credentials, CreateOS, and a sealed sandbox end to end");
   const { env } = await import("./env.js");
   step("Local setup");
-  const { CREDENTIALS, sourceOf } = await import("./env.js");
+  const { requiredCredentials, sourceOf } = await import("./env.js");
+  const CREDENTIALS = requiredCredentials();
   // Every credential at once, with where it came from; values are never printed.
   for (const n of CREDENTIALS) {
     const from = sourceOf(n);
@@ -449,7 +450,7 @@ async function doctor() {
     throw new UserError("DATABASE_URL is not a URL");
   }
   log(`${"Stripe key mode".padEnd(26)} ${/^(sk|rk)_test_/.test(env.stripeKey()) ? green("test mode") : red("not a test key: apply will refuse")}`);
-  log(`${"model".padEnd(26)} ${env.model()}`);
+  log(`${"model".padEnd(26)} ${env.model()} (${env.provider()})`);
   const expected = loadExpected();
   log(`${"seed answer key".padEnd(26)} ${expected ? "seed/expected.json" : dim("none yet (pnpm seed)")}`);
 

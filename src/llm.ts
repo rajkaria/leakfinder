@@ -100,6 +100,65 @@ function client(): Anthropic {
   return shared;
 }
 
+/**
+ * DeepSeek speaks the OpenAI chat-completions protocol. This adapter takes the
+ * Anthropic-shaped request Coder builds and returns an Anthropic-shaped reply,
+ * so the loop, the guard and the transcript are the same for either provider.
+ * Retries 429 and 5xx with backoff, like the Anthropic client does.
+ */
+export const deepseekCreate: CreateMessage = async (params) => {
+  const text = (c: unknown): string =>
+    typeof c === "string" ? c : Array.isArray(c) ? c.map((b: any) => (b?.type === "text" ? b.text : "")).join("\n") : "";
+  const body = {
+    model: params.model,
+    messages: [
+      { role: "system", content: text(params.system) },
+      ...params.messages.map((m) => ({ role: m.role, content: text(m.content) })),
+    ],
+    max_tokens: Math.min(params.max_tokens, 8_192),
+    temperature: 0,
+    stream: false,
+  };
+  let last: unknown = null;
+  for (let attempt = 0; attempt <= CLIENT_OPTIONS.maxRetries; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, Math.min(16_000, 1_000 * 2 ** attempt)));
+    let res: Response;
+    try {
+      res = await fetch(`${env.deepseekBaseUrl()}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${env.deepseekKey()}` },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(CLIENT_OPTIONS.timeout),
+      });
+    } catch (e) {
+      last = e;
+      continue;
+    }
+    if (res.status === 429 || res.status >= 500) {
+      last = new Error(`DeepSeek ${res.status}`);
+      continue;
+    }
+    const json: any = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(`DeepSeek ${res.status}: ${String(json?.error?.message ?? "request failed").slice(0, 300)}`);
+    const choice = json?.choices?.[0];
+    const u = json?.usage ?? {};
+    const hit = Number(u.prompt_cache_hit_tokens ?? 0);
+    const finish = choice?.finish_reason;
+    return {
+      content: [{ type: "text", text: String(choice?.message?.content ?? ""), citations: null }],
+      stop_reason: finish === "length" ? "max_tokens" : finish === "content_filter" ? "refusal" : "end_turn",
+      stop_details: null,
+      usage: {
+        input_tokens: Math.max(0, Number(u.prompt_tokens ?? 0) - hit),
+        cache_read_input_tokens: hit,
+        cache_creation_input_tokens: 0,
+        output_tokens: Number(u.completion_tokens ?? 0),
+      },
+    } as unknown as Awaited<ReturnType<CreateMessage>>;
+  }
+  throw last instanceof Error ? last : new Error("DeepSeek request failed");
+};
+
 export class Coder implements CoderLike {
   private history: Anthropic.Beta.BetaMessageParam[] = [];
   private readonly model: string;
@@ -112,8 +171,9 @@ export class Coder implements CoderLike {
     opts: { create?: CreateMessage; model?: string } = {},
   ) {
     this.model = opts.model ?? env.model();
-    this.create = opts.create ?? ((p) => client().beta.messages.create(p));
-    this.fallbacks = FALLBACK_MODELS.has(this.model);
+    const deepseek = !opts.create && env.provider() === "deepseek";
+    this.create = opts.create ?? (deepseek ? deepseekCreate : (p) => client().beta.messages.create(p));
+    this.fallbacks = !deepseek && FALLBACK_MODELS.has(this.model);
     transcript.log({ kind: "system", text: system });
   }
 
@@ -167,7 +227,7 @@ export class Coder implements CoderLike {
       messages: this.history,
     };
     const effort = env.effort();
-    if (effort) params.output_config = { effort };
+    if (effort && env.provider() === "anthropic") params.output_config = { effort };
     if (!this.fallbacks) return this.create(params);
     try {
       return await this.create({ ...params, betas: [FALLBACK_BETA], fallbacks: "default" });
