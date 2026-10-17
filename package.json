@@ -16,7 +16,8 @@
     "report": "tsx src/cli.ts report",
     "spike": "tsx scripts/spike-sandbox.ts",
     "test": "tsx --test test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "down": "tsx src/cli.ts down"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.135.0",
