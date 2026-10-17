@@ -459,7 +459,7 @@ async function doctor() {
   log(`signed in: ${JSON.stringify(me).slice(0, 160)}`);
 
   step("A sealed sandbox, end to end");
-  const room = await SealedRoom.open({ name: `leakfinder-doctor-${Date.now().toString(36)}` });
+  const room = await SealedRoom.open({ name: `lf-doctor-${Date.now().toString(36)}` });
   try {
     log(`sandbox ${room.id} · egress ${room.egress.join(", ")}`);
     const seal = await room.sealCheck();

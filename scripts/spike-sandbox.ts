@@ -36,7 +36,7 @@ async function main() {
 
   let room: SealedRoom | undefined;
   try {
-    room = await SealedRoom.open({ name: `leakfinder-spike-${Date.now().toString(36)}`, ingress: true });
+    room = await SealedRoom.open({ name: `lf-spike-${Date.now().toString(36)}`, ingress: true });
     log(`opened ${room.id}`);
     log(`egress ${room.egress.join(", ")}`);
 

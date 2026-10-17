@@ -191,7 +191,8 @@ export class SealedRoom {
         {
           shape: "s-1vcpu-1gb",
           rootfs: "devbox:1",
-          name: opts.name ?? `leakfinder-${Date.now().toString(36)}`,
+          // The API caps names at 22 characters.
+          name: (opts.name ?? `leakfinder-${Date.now().toString(36)}`).slice(0, 22),
           envs: {
             STRIPE_SECRET_KEY: env.stripeKey(),
             DATABASE_URL: env.databaseUrl(),
