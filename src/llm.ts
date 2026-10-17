@@ -12,6 +12,13 @@ import { env } from "./env.js";
 /** Also catches the URL-encoded form (`%40`) that shows up in request logs. */
 const EMAIL = /[A-Z0-9._%+-]+(?:@|%40)[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 export const EMAIL_MARK = "[email redacted by leakfinder]";
+/**
+ * The room holds STRIPE_SECRET_KEY and a script that prints os.environ would
+ * show it; the transcript is meant to be shared. (A DSN password already reads
+ * as an email: `npg_x@ep-....neon.tech`.)
+ */
+const STRIPE_KEY = /\b(?:sk|rk)_(?:test|live)_[A-Za-z0-9]{8,}/g;
+export const KEY_MARK = "[stripe key redacted by leakfinder]";
 /** Default cap on text going to the model: enough for a traceback, too small for a table dump. */
 export const GUARD_MAX = 8_000;
 
@@ -27,10 +34,12 @@ export interface GuardReport {
  */
 export function guard(text: string, max = GUARD_MAX): { text: string; report: GuardReport } {
   let emailsRedacted = 0;
-  let out = String(text ?? "").replace(EMAIL, () => {
-    emailsRedacted++;
-    return EMAIL_MARK;
-  });
+  let out = String(text ?? "")
+    .replace(STRIPE_KEY, KEY_MARK)
+    .replace(EMAIL, () => {
+      emailsRedacted++;
+      return EMAIL_MARK;
+    });
   let truncatedChars = 0;
   if (out.length > max) {
     truncatedChars = out.length - max;

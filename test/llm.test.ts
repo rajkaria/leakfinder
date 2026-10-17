@@ -24,6 +24,12 @@ test("guard redacts emails, counts them, and catches the %40 form", () => {
   assert.equal(g.report.truncatedChars, 0);
 });
 
+test("guard redacts a Stripe secret key a script printed from os.environ", () => {
+  const g = guard("environ({'STRIPE_SECRET_KEY': 'sk_test_51AbCdEfGhIjKlMnOp', 'X': 'rk_live_ZZZZZZZZZZ'}) and the literal \"sk_test_\" stays");
+  assert.ok(!/sk_test_51|rk_live_Z/.test(g.text));
+  assert.ok(g.text.includes('"sk_test_"'), "a bare prefix (as in the fix script's key check) is not a key");
+});
+
 test("guard caps output with a visible marker and keeps head and tail", () => {
   const text = "HEAD" + "x".repeat(20_000) + "Traceback tail: KeyError: 'plan'";
   const g = guard(text, 1000);

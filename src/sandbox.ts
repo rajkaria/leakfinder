@@ -118,7 +118,9 @@ except OSError:
     ips = []
 try:
     import stripe, psycopg
-    libs = True
+    # The prompts use InvoicePayment (stripe-python 12+, API 2025-03-31.basil); an older preinstalled stripe pins an
+    # API where current_period_end and refunds work differently, so it counts as missing and gets upgraded.
+    libs = hasattr(stripe, "InvoicePayment")
 except Exception:
     libs = False
 print(json.dumps({"resolvers": servers, "db_ips": ips, "libs": libs, "python": sys.version.split()[0]}))
@@ -136,6 +138,17 @@ except urllib.error.HTTPError as e:
 except Exception:
     code = 0
 print("PROBE %d %.2f" % (code, time.time() - t0))
+`;
+
+const RESOLVE_PY = `
+import socket, sys
+ips = set()
+for h in sys.argv[1:]:
+    try:
+        ips.update(a[4][0] for a in socket.getaddrinfo(h, 443, socket.AF_INET))
+    except OSError:
+        pass
+print(" ".join(sorted(ips)))
 `;
 
 interface Probe {
@@ -182,6 +195,8 @@ export class SealedRoom {
           envs: {
             STRIPE_SECRET_KEY: env.stripeKey(),
             DATABASE_URL: env.databaseUrl(),
+            // libpq and psycopg default to a ~2 minute connect wait per address; a blocked address should fail a turn fast.
+            PGCONNECT_TIMEOUT: "15",
           },
           egress: [...initial, ...INSTALL_HOSTS],
           ingress_enabled: opts.ingress ?? false,
@@ -204,12 +219,38 @@ export class SealedRoom {
       });
       if (!probe.libs) {
         await room.applyRules([...sealed, ...INSTALL_HOSTS]);
+        // Also pin PyPI by the addresses the VM resolves (IP rules apply at once), in case its CDN answers the VM
+        // with addresses the hostname rule does not cover; both go away when the room is sealed below.
+        const pypiIps = await room.resolveInVm(INSTALL_HOSTS);
+        if (pypiIps.length) await room.applyRules(uniq([...sealed, ...INSTALL_HOSTS, ...pypiIps.map((ip) => `${ip}:443`)]));
         await room.installLibraries();
       }
       await room.applyRules(sealed);
       return room;
     } catch (e) {
-      await room.destroy().catch(() => {});
+      const gone = await room.destroy().then(
+        () => true,
+        () => false,
+      );
+      // Free allows one sandbox: if it could not be destroyed, the next run needs its id.
+      if (!gone && e instanceof Error) e.message += ` (sandbox ${room.id} may still be running: destroy it before the next run)`;
+      throw e;
+    }
+  }
+
+  /**
+   * Destroy a sandbox from an earlier command by id and wait until it stops
+   * counting against the plan's cap. False when it was already gone.
+   */
+  static async retire(id: string): Promise<boolean> {
+    try {
+      const box = await SealedRoom.client().getSandbox(id);
+      if (box.status === "destroyed" || box.status === "failed") return false;
+      await box.destroy();
+      await box.waitUntilDestroyed({ timeoutMs: 30_000 }).catch(() => {});
+      return true;
+    } catch (e) {
+      if (e instanceof CreateosSandboxNotFoundError) return false;
       throw e;
     }
   }
@@ -305,17 +346,19 @@ export class SealedRoom {
    * The original is always resumed before this returns or throws.
    */
   async pauseAndFork(): Promise<SealedRoom> {
-    await this.box.refresh();
-    if (this.box.status === "running") await this.box.pause();
-    await this.box.waitUntilPaused({ timeoutMs: 180_000 });
     let copy: Sandbox | undefined;
     try {
+      await this.box.refresh();
+      if (this.box.status === "running") await this.box.pause();
+      await this.box.waitUntilPaused({ timeoutMs: 180_000 });
       // No retries: the SDK retries 429 by default, which only delays the inevitable on Free.
       copy = await this.box.fork({ egress: this.rules, ingress_enabled: false }, { retry: false, timeoutMs: 120_000 });
       await copy.waitUntilRunning({ timeoutMs: 180_000 });
     } catch (e) {
       if (copy) await copy.destroy().catch(() => {});
       await this.resumeOriginal();
+      // The caller falls back to this room at once; a resume can land on a fresh host where the Stripe rule propagates again.
+      await this.waitForStripe();
       if (isCapError(e)) throw new Error(FORK_NEEDS_PLAN);
       throw e;
     }
@@ -392,6 +435,8 @@ echo "report server did not answer on 127.0.0.1:${REPORT_PORT}"; tail -n 20 ${HO
       if (e instanceof CreateosSandboxNotFoundError) return; // already gone
       throw e;
     }
+    // Destroy is async and a `destroying` sandbox still counts against the cap: on Free the next create would 429.
+    await this.box.waitUntilDestroyed({ timeoutMs: 30_000 }).catch(() => {});
   }
 
   // ---------------------------------------------------------------------------
@@ -421,9 +466,10 @@ echo "report server did not answer on 127.0.0.1:${REPORT_PORT}"; tail -n 20 ${HO
 
   /** Only runs while PyPI is still on the allowlist. pip retries cover hostname-rule propagation. */
   private async installLibraries(): Promise<void> {
-    const pip = `python3 -m pip install -q --disable-pip-version-check --retries 8 --timeout 15 stripe "psycopg[binary]"`;
+    // -U: an old preinstalled stripe satisfies a bare install and would stay.
+    const pip = `python3 -m pip install -q -U --disable-pip-version-check --retries 8 --timeout 15 stripe "psycopg[binary]"`;
     const r = await this.exec(`(${pip} || ${pip} --break-system-packages) 2>&1 | tail -n 5; exit \${PIPESTATUS[0]}`, 300_000);
-    const check = await this.exec(`python3 -c "import stripe, psycopg; print('ok')"`, 60_000);
+    const check = await this.exec(`python3 -c "import stripe, psycopg; stripe.InvoicePayment; print('ok')"`, 60_000);
     if (!check.stdout.includes("ok")) {
       throw new Error(`pip install of stripe and psycopg failed (exit ${r.exit_code}): ${(r.stdout + r.stderr).trim()}`);
     }
@@ -468,9 +514,16 @@ echo "report server did not answer on 127.0.0.1:${REPORT_PORT}"; tail -n 20 ${HO
     }
   }
 
+  /** IPv4 addresses of `hosts` as the VM's own resolver answers. Empty when DNS fails there. */
+  private async resolveInVm(hosts: string[]): Promise<string[]> {
+    const r = await this.exec(`python3 -c ${shq(RESOLVE_PY)} ${hosts.map(shq).join(" ")}`, 30_000).catch(() => null);
+    return uniq((r?.stdout ?? "").trim().split(/\s+/).filter((ip) => isIP(ip) === 4)).sort();
+  }
+
   /** Replace the Stripe hostname rule with its current addresses on 443, and make sure DNS is open. */
   private async pinStripe(): Promise<boolean> {
-    const ips = await resolveV4(STRIPE_HOST);
+    // The VM may sit in another region than this machine and get other Stripe addresses; allow both views.
+    const ips = uniq([...(await resolveV4(STRIPE_HOST)), ...(await this.resolveInVm([STRIPE_HOST]))]).sort();
     if (!ips.length) return false;
     const rest = this.rules.filter((r) => !isStripeRule(r));
     await this.applyRules(uniq([...ips.map((ip) => `${ip}:443`), ...rest, `${FALLBACK_DNS}:53`]));
@@ -541,7 +594,9 @@ async function explainCreate(e: unknown): Promise<Error> {
     /* listing is only a hint */
   }
   return new Error(
-    `CreateOS sandbox cap reached (Free = 1 concurrent; paused sandboxes count).` +
-      (held ? ` Destroy the old room first: ${held}` : ""),
+    held
+      ? `CreateOS sandbox cap reached (Free = 1 concurrent; paused sandboxes count). Destroy the old room first: ${held}`
+      : // Nothing is holding a slot, so it is the other cap: creates per rolling 24 h, destroyed sandboxes included.
+        `CreateOS refused a new sandbox and none is running: likely the daily cap (Free = 10 per rolling 24 h, destroyed ones count). ${e instanceof Error ? e.message : ""}`.trim(),
   );
 }

@@ -92,7 +92,11 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error(`spike failed: ${(e as Error).message}`);
-  process.exit(1);
-});
+// The SDK's HTTP/2 session is never unref'd; without an explicit exit the script would not return to the prompt.
+main().then(
+  () => process.exit(0),
+  (e) => {
+    console.error(`spike failed: ${(e as Error).message}`);
+    process.exit(1);
+  },
+);

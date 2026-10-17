@@ -187,18 +187,22 @@ async function audit(demo: boolean) {
 
   const prev = tryReadLast();
   if (prev?.sandboxId) {
-    // The Free plan runs one sandbox at a time; the last run's room would block this one.
+    // The Free plan runs one sandbox at a time; the last run's room would block this one until it is fully destroyed.
     try {
-      const box = await SealedRoom.client().getSandbox(prev.sandboxId);
-      await box.destroy();
-      log(dim(`retired the last run's sandbox ${prev.sandboxId}`));
-    } catch {
-      /* already gone */
+      if (await SealedRoom.retire(prev.sandboxId)) log(dim(`retired the last run's sandbox ${prev.sandboxId}`));
+    } catch (e) {
+      log(yellow(`could not retire the last run's sandbox ${prev.sandboxId}: ${msg(e)}`));
     }
   }
 
   step("The agent audits your schema inside a sealed CreateOS sandbox");
-  const out = await runAudit(runDir, log, { fresh, ingress: true });
+  // Recorded the moment the room exists, so a crash or Ctrl-C mid-audit leaves an id that pnpm down and the next scan can find.
+  const openRoom = async (o: { ingress?: boolean }) => {
+    const room = await SealedRoom.open(o);
+    writeLast({ runDir, sandboxId: room.id, token, url: null });
+    return room;
+  };
+  const out = await runAudit(runDir, log, { fresh, ingress: true }, { openRoom });
   writeLast({ runDir, sandboxId: out.room.id, token, url: null });
   const f = out.findings;
   writeFileSync(join(runDir, "findings.json"), JSON.stringify(f, null, 2) + "\n");
@@ -320,20 +324,29 @@ async function apply() {
     applied = prior;
   } else {
     let fork: Room | null = null;
-    try {
-      log(`forking ${room.id}: the dry run happens in a copy, the original stays untouched`);
-      fork = await room.pauseAndFork();
-      log(`fork ${fork.id} running`);
-    } catch (e) {
-      log(yellow(`no fork: ${msg(e)}`));
-      log("dry run in the original instead; APPLY=0 changes nothing");
+    if (flag("--no-fork")) {
+      // On Free the fork always fails after a full pause and resume of the room; skip straight to the fallback.
+      log("--no-fork: dry run in the original; APPLY=0 changes nothing");
+    } else {
+      try {
+        log(`forking ${room.id}: the dry run happens in a copy, the original stays untouched`);
+        fork = await room.pauseAndFork();
+        log(`fork ${fork.id} running`);
+      } catch (e) {
+        log(yellow(`no fork: ${msg(e)}`));
+        log("dry run in the original instead; APPLY=0 changes nothing");
+      }
     }
     try {
       await runFix(fork ?? room, "0");
     } finally {
       if (fork) {
-        await fork.destroy();
-        log(dim(`fork ${fork.id} destroyed`));
+        const id = fork.id;
+        // A failed cleanup must not mask the dry run's own error, and the id is what the user needs to clean up by hand.
+        await fork.destroy().then(
+          () => log(dim(`fork ${id} destroyed`)),
+          (e) => log(yellow(`fork ${id} was not destroyed (${msg(e)}); destroy it in the CreateOS console`)),
+        );
       }
     }
 
@@ -394,7 +407,9 @@ async function serve() {
 
 async function report() {
   title("report", "re-render the last report on this machine");
-  const runDir = tryReadLast()?.runDir ?? latestRunDir();
+  // last.json can name a run whose audit failed (it is written when the room opens); fall back to the newest finished one.
+  const lastDir = tryReadLast()?.runDir;
+  const runDir = lastDir && existsSync(join(lastDir, "findings.json")) ? lastDir : latestRunDir();
   if (!runDir) throw new UserError("no runs yet: run pnpm scan first");
   const { f, rec } = loadRun(runDir);
   step("Render");
@@ -444,8 +459,7 @@ async function down() {
   const { SealedRoom } = await import("./sandbox.js");
   step("Destroy");
   try {
-    await (await SealedRoom.client().getSandbox(last.sandboxId)).destroy();
-    log(`sandbox ${last.sandboxId} destroyed`);
+    log(`sandbox ${last.sandboxId} ${(await SealedRoom.retire(last.sandboxId)) ? "destroyed" : "was already gone"}`);
   } catch (e) {
     log(dim(`sandbox ${last.sandboxId}: ${msg(e)}`));
   }
@@ -455,7 +469,7 @@ async function down() {
 const COMMANDS: Record<string, [() => Promise<void>, string]> = {
   doctor: [doctor, "check credentials, open a sealed sandbox, prove the seal, destroy it"],
   audit: [() => audit(false), "the agent audits your schema in a sealed sandbox [--fresh]"],
-  apply: [apply, "dry run fix.py in a fork; --yes applies it in Stripe test mode"],
+  apply: [apply, "dry run fix.py in a fork; --yes applies it in Stripe test mode [--no-fork on Free]"],
   serve: [serve, "re-serve the last report from its sandbox"],
   report: [report, "re-render the last report locally from findings.json"],
   demo: [() => audit(true), "audit, then print the report URL big"],
@@ -474,8 +488,14 @@ if (!entry) {
   usage();
   process.exit(cmd && !["-h", "--help", "help"].includes(cmd) ? 2 : 0);
 }
-entry[0]().catch((e) => {
-  console.error(`${stamp()}  ${red(bold("error"))} ${red(msg(e))}`);
-  if (process.env.DEBUG && !(e instanceof UserError)) console.error(e);
-  process.exit(1);
-});
+// The CreateOS SDK keeps an HTTP/2 session (and a keep-alive pool) open that it never unrefs, so Node would sit at
+// the prompt after the finale instead of exiting. Exit explicitly once stdout has drained.
+const exit = (code: number) => process.stdout.write("", () => process.exit(code));
+entry[0]().then(
+  () => exit(0),
+  (e) => {
+    console.error(`${stamp()}  ${red(bold("error"))} ${red(msg(e))}`);
+    if (process.env.DEBUG && !(e instanceof UserError)) console.error(e);
+    exit(1);
+  },
+);
