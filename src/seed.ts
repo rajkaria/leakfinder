@@ -68,7 +68,8 @@ const planted: Record<Exclude<Cohort, "free">, CohortSpec> = {
   trialing: { count: 2, appUser: true, plan: "pro", customer: true, sub: { status: "trialing", trialDays: 14 }, appRow: "mirror" },
   cancelling: { count: 2, appUser: true, plan: "pro", customer: true, sub: { status: "active", cancelAtPeriodEnd: true }, appRow: "mirror" },
   cancelled_unsynced: { count: 5, appUser: true, plan: "pro", customer: true, sub: { status: "canceled", cancelAfter: true }, appRow: "stuck_active" },
-  never_paid: { count: 7, appUser: true, plan: "pro", customer: false, sub: null, appRow: null },
+  // Started checkout, never paid; a webhook that was never verified granted Pro anyway. Their Stripe customer exists, so a fix can invoice them.
+  never_paid: { count: 7, appUser: true, plan: "pro", customer: true, sub: null, appRow: null },
   free_customer: { count: 3, appUser: true, plan: "free", customer: true, sub: null, appRow: null },
   orphan_payer: { count: 3, appUser: false, plan: null, customer: true, sub: { status: "active" }, appRow: null },
 };
@@ -293,7 +294,9 @@ export async function materialize(stripe: Stripe, p: Person, priceId: string): P
   const userId = spec.appUser ? randomUUID() : null;
   if (!spec.customer) return { ...p, userId, customerId: null, sub: null };
   const card = spec.sub ? { payment_method: "pm_card_visa", invoice_settings: { default_payment_method: "pm_card_visa" } } : {};
-  const customer = await retry429(() => stripe.customers.create({ email: p.email, name: p.name, metadata: TAG, ...card }));
+  // A billing address on every customer: Stripe accounts in India reject USD (export) payments and invoices without one.
+  const address = { line1: "100 Demo Street", city: "San Francisco", state: "CA", postal_code: "94105", country: "US" };
+  const customer = await retry429(() => stripe.customers.create({ email: p.email, name: p.name, address, metadata: TAG, ...card }));
   if (!spec.sub) return { ...p, userId, customerId: customer.id, sub: null };
 
   const want = spec.sub;

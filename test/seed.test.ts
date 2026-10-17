@@ -8,8 +8,9 @@ import pg from "pg";
 import type Stripe from "stripe";
 import { APP_USERS, COHORTS, PRO_CENTS, answerKey, appRowsFor, assertDemoDatabase, insertRows, materialize, plan, snapshotOf, stripeSubsOf, sweepPreviousSeed } from "../src/seed.js";
 import type { Seeded } from "../src/seed.js";
-import { countsOf, driftFrom, loadStripe, monthlyCents, pgClient, pool, retry429 } from "../src/verify.js";
+import { countsOf, driftFrom, loadApp, loadStripe, monthlyCents, pgClient, pool, retry429 } from "../src/verify.js";
 import type { AppSnapshot, StripeSub } from "../src/verify.js";
+import { FakeStripe, withFakeStripe } from "./fake-stripe.js";
 
 const PRICE = { id: "price_pro", unit_amount: PRO_CENTS, interval: "month" };
 
@@ -84,7 +85,7 @@ test("noise is not drift: trials, cancel-at-period-end and free users with a Str
   // The noise rows really are in the data, so the test above means something.
   assert.equal(app.subscriptions.filter((r) => r.status === "trialing").length, 2);
   assert.equal(seeded.filter((s) => s.sub?.cancelAtPeriodEnd).length, 2);
-  assert.equal(app.customers.length, 32 + 2 + 2 + 5 + 3);
+  assert.equal(app.customers.length, 32 + 2 + 2 + 5 + 7 + 3);
 });
 
 test("the answer key matches the contract and names a grep target that is in A", () => {
@@ -239,164 +240,10 @@ test("retry429 retries rate limits only", async () => {
 
 // ---------------------------------------------------------------- against a fake Stripe, through the real SDK
 //
-// A small in-memory Stripe on localhost. The real stripe-node v23 client talks
-// to it over HTTP, so these tests check the requests the seed actually sends
-// (paths, form-encoded params, pagination, expand) and, above all, that the
-// sweep deletes only what carries the seed's tag.
-
-type Obj = Record<string, any>;
-
-function parseForm(qs: string): Obj {
-  const out: Obj = {};
-  for (const [k, v] of new URLSearchParams(qs)) {
-    const parts = k.split(/[[\]]+/).filter(Boolean);
-    let o = out;
-    parts.forEach((p, i) => {
-      if (i === parts.length - 1) o[p] = v;
-      else o = o[p] ??= /^\d+$/.test(parts[i + 1]) ? [] : {};
-    });
-  }
-  return out;
-}
-
-class FakeStripe {
-  customers = new Map<string, Obj>();
-  subs = new Map<string, Obj>();
-  prices = new Map<string, Obj>();
-  products = new Map<string, Obj>();
-  /** Stripe Search is not offered to accounts in India; flip this to make it 400. */
-  searchWorks = true;
-  /** Ids search has not indexed yet (search runs up to a minute behind). */
-  searchLag = new Set<string>();
-  calls: string[] = [];
-  private n = 0;
-  id = (prefix: string) => `${prefix}_${String(++this.n).padStart(6, "0")}`;
-
-  customer(fields: Obj = {}) {
-    const c = { id: this.id("cus"), object: "customer", metadata: {}, invoice_settings: { default_payment_method: null }, ...fields };
-    this.customers.set(c.id, c);
-    return c;
-  }
-  price(fields: Obj = {}) {
-    const p = { id: this.id("price"), object: "price", active: true, unit_amount: 2900, currency: "usd", recurring: { interval: "month", interval_count: 1 }, metadata: {}, ...fields };
-    this.prices.set(p.id, p);
-    return p;
-  }
-  product(fields: Obj = {}) {
-    const p = { id: this.id("prod"), object: "product", active: true, metadata: {}, ...fields };
-    this.products.set(p.id, p);
-    return p;
-  }
-  sub(customer: string, price: Obj, fields: Obj = {}) {
-    const now = 1_790_000_000;
-    const s = {
-      id: this.id("sub"),
-      object: "subscription",
-      customer,
-      status: "active",
-      cancel_at_period_end: false,
-      metadata: {},
-      items: { object: "list", has_more: false, data: [{ id: this.id("si"), object: "subscription_item", current_period_start: now, current_period_end: now + 30 * 86_400, price, quantity: 1 }] },
-      ...fields,
-    };
-    this.subs.set(s.id, s);
-    return s;
-  }
-
-  private page(items: Obj[], q: Obj) {
-    const limit = Number(q.limit ?? 10);
-    const from = q.starting_after ? items.findIndex((x) => x.id === q.starting_after) + 1 : 0;
-    const data = items.slice(from, from + limit);
-    return { object: "list", data, has_more: from + limit < items.length, url: "/v1/x" };
-  }
-  private newestFirst = (m: Map<string, Obj>) => [...m.values()].reverse();
-  private expandSub = (s: Obj, q: Obj) => {
-    const wants = Object.values(q.expand ?? {}).includes("data.customer");
-    if (!wants) return s;
-    return { ...s, customer: this.customers.get(s.customer) ?? { id: s.customer, object: "customer", deleted: true } };
-  };
-
-  handle(method: string, path: string, q: Obj): [number, Obj] {
-    this.calls.push(`${method} ${path}`);
-    const missing: [number, Obj] = [404, { error: { type: "invalid_request_error", code: "resource_missing", message: `No such object: ${path}` } }];
-    let m: RegExpMatchArray | null;
-    if (method === "GET" && path === "/v1/customers/search") {
-      if (!this.searchWorks) return [400, { error: { type: "invalid_request_error", message: "Search is not available in your country." } }];
-      const [, key, val] = /metadata\['([^']+)'\]:'([^']*)'/.exec(q.query) ?? [];
-      const data = this.newestFirst(this.customers).filter((c) => c.metadata?.[key] === val && !this.searchLag.has(c.id));
-      return [200, { object: "search_result", data, has_more: false, next_page: null, url: "/v1/customers/search" }];
-    }
-    if (method === "GET" && path === "/v1/customers") return [200, this.page(this.newestFirst(this.customers), q)];
-    if (method === "POST" && path === "/v1/customers") {
-      const pm = q.payment_method ? this.id("pm") : null;
-      return [200, this.customer({ email: q.email, name: q.name, metadata: q.metadata ?? {}, invoice_settings: { default_payment_method: q.invoice_settings?.default_payment_method ? pm : null } })];
-    }
-    if ((m = path.match(/^\/v1\/customers\/(\w+)$/)) && method === "DELETE") {
-      if (!this.customers.delete(m[1])) return missing;
-      for (const s of this.subs.values()) if (s.customer === m[1] && s.status !== "canceled") s.status = "canceled";
-      return [200, { id: m[1], object: "customer", deleted: true }];
-    }
-    if (method === "GET" && path === "/v1/subscriptions") {
-      const all = this.newestFirst(this.subs).filter((s) => (q.status === "all" ? true : s.status !== "canceled"));
-      const page = this.page(all, q);
-      return [200, { ...page, data: page.data.map((s) => this.expandSub(s, q)) }];
-    }
-    if (method === "POST" && path === "/v1/subscriptions") {
-      const c = this.customers.get(q.customer);
-      const price = this.prices.get(q.items?.[0]?.price);
-      if (!c || !price) return missing;
-      assert.equal(q.payment_behavior, "error_if_incomplete");
-      const trial = Number(q.trial_period_days ?? 0);
-      // No card on file and no trial: the first invoice cannot be paid.
-      const status = trial ? "trialing" : c.invoice_settings.default_payment_method ? "active" : "incomplete";
-      return [200, this.sub(c.id, price, { status, metadata: q.metadata ?? {}, cancel_at_period_end: q.cancel_at_period_end === "true" })];
-    }
-    if ((m = path.match(/^\/v1\/subscriptions\/(\w+)$/))) {
-      const s = this.subs.get(m[1]);
-      if (!s) return missing;
-      if (method === "DELETE") s.status = "canceled";
-      return [200, s];
-    }
-    for (const [base, store] of [["prices", this.prices], ["products", this.products]] as const) {
-      if (method === "GET" && path === `/v1/${base}`) return [200, this.page(this.newestFirst(store).filter((x) => q.active === undefined || String(x.active) === q.active), q)];
-      if (method === "POST" && path === `/v1/${base}`) {
-        const fields = { ...q, metadata: q.metadata ?? {} };
-        if (base === "prices") return [200, this.price({ ...fields, unit_amount: Number(q.unit_amount), recurring: { interval: q.recurring?.interval, interval_count: 1 } })];
-        return [200, this.product(fields)];
-      }
-      if ((m = path.match(new RegExp(`^/v1/${base}/(\\w+)$`))) && method === "POST") {
-        const x = store.get(m[1]);
-        if (!x) return missing;
-        if (q.active !== undefined) x.active = q.active === "true";
-        return [200, x];
-      }
-    }
-    return [404, { error: { type: "invalid_request_error", message: `fake has no route ${method} ${path}` } }];
-  }
-}
-
-async function withFakeStripe(fn: (fake: FakeStripe, stripe: Stripe) => Promise<void>) {
-  const { createServer } = await import("node:http");
-  const { default: StripeSdk } = await import("stripe");
-  const fake = new FakeStripe();
-  const server = createServer((req, res) => {
-    let body = "";
-    req.on("data", (d) => (body += d));
-    req.on("end", () => {
-      const url = new URL(req.url ?? "/", "http://fake");
-      const [status, json] = fake.handle(req.method ?? "GET", url.pathname, parseForm(req.method === "GET" || req.method === "DELETE" ? url.search.slice(1) : body));
-      res.writeHead(status, { "content-type": "application/json", "request-id": "req_fake" }).end(JSON.stringify(json));
-    });
-  });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  const port = (server.address() as { port: number }).port;
-  const stripe = new StripeSdk("sk_test_fake", { host: "127.0.0.1", port, protocol: "http", maxNetworkRetries: 0, telemetry: false });
-  try {
-    await fn(fake, stripe);
-  } finally {
-    server.close();
-  }
-}
+// The fake in test/fake-stripe.ts, driven by the real stripe-node v23 client,
+// so these tests check the requests the seed actually sends (paths,
+// form-encoded params, pagination, expand) and, above all, that the sweep
+// deletes only what carries the seed's tag.
 
 /** An account with the previous seed in it, and objects that belong to someone else. */
 function accountWithLeftovers(fake: FakeStripe) {
@@ -582,4 +429,20 @@ test("the seed only resets a database it filled", async () => {
   await assert.rejects(assertDemoDatabase(theirs.db), /3 rows the seed did not create/);
   const otherShape = fakeDb((sql) => (sql.includes("to_regclass") ? [{ present: true }] : new Error('column "email" does not exist')));
   await assert.rejects(assertDemoDatabase(otherShape.db), /users table the seed did not create/);
+});
+
+test("loadApp sends one query at a time (pg 8.2x prints a DeprecationWarning on a busy client, pg 9 throws)", async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const db = {
+    query: async (sql: string) => {
+      peak = Math.max(peak, ++inFlight);
+      await new Promise((r) => setTimeout(r, 2));
+      inFlight--;
+      return { rows: sql.includes("from prices") ? [{ id: "p_m", unit_amount: "2900", interval: "month" }] : [] };
+    },
+  } as unknown as pg.ClientBase;
+  const app = await loadApp(db);
+  assert.equal(peak, 1);
+  assert.deepEqual(app.prices, [{ id: "p_m", unit_amount: 2900, interval: "month" }], "unit_amount read as a number");
 });

@@ -199,13 +199,12 @@ const view = (s: Stripe.Subscription): StripeSub => ({ id: s.id, customer: custo
 // ---------------------------------------------------------------- live reads
 
 export async function loadApp(db: pg.ClientBase): Promise<AppSnapshot> {
-  const [users, customers, subscriptions, entitlements, prices] = await Promise.all([
-    db.query("select id::text, email from users"),
-    db.query("select id::text as user_id, stripe_customer_id from customers"),
-    db.query("select id, user_id::text, status, price_id from subscriptions"),
-    db.query("select user_id::text, plan from entitlements"),
-    db.query('select id, unit_amount, "interval" from prices'),
-  ]);
+  // One query at a time: pg 8.2x prints a DeprecationWarning on the demo terminal (and pg 9 throws) when a client gets a query while one is running.
+  const users = await db.query("select id::text, email from users");
+  const customers = await db.query("select id::text as user_id, stripe_customer_id from customers");
+  const subscriptions = await db.query("select id, user_id::text, status, price_id from subscriptions");
+  const entitlements = await db.query("select user_id::text, plan from entitlements");
+  const prices = await db.query('select id, unit_amount, "interval" from prices');
   return {
     users: users.rows,
     customers: customers.rows,
