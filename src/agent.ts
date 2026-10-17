@@ -437,7 +437,7 @@ export async function writeFix(
       payers_without_account: f.payers_without_account.length,
       stale_subscription_rows: f.stale_subscription_rows.length,
       monthly_leak_cents: f.monthly_leak_cents,
-    })}. Write the fix script now. It will be saved as ${FIX_PATH} and dry-run first with APPLY=0. Reply with one short sentence and then the complete script in one \`\`\`python block.`;
+    })}. Write the fix script now. It will be saved as ${FIX_PATH} and dry-run first with APPLY=0.`;
   if (known?.auditCode) {
     // The fix needs the schema the audit learned; the audit script carries it as code, with no data.
     prompt += `\n\nThis is the audit script that wrote ${FINDINGS_PATH}; it shows the tables, columns and matching rules:\n\n${fenced(known.auditCode)}`;
@@ -458,6 +458,9 @@ export async function writeFix(
       `Its dry run failed (${run.why}). Output (guarded):\n\n${run.out.text}`;
   }
 
+  // Last, after any pasted script, and code first: asked for "a sentence, then the script", DeepSeek often stopped
+  // after the sentence (live rehearsals: ~1 in 2 first drafts); code-first came back with code every time.
+  prompt += "\n\nReply with the complete fix script in one ```python block, then one short sentence saying what it does.";
   const coder = (deps.coder ?? ((s, t) => new Coder(s, t)))(SYSTEM + FIX_SYSTEM_SUFFIX, transcript);
   for (let turn = 1; turn <= FIX_TURNS; turn++) {
     const reply = await coder.ask(prompt);

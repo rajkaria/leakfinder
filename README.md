@@ -28,20 +28,20 @@ LeakFinder reads your schema, writes Python that reconciles it with every Stripe
 
 ## How it works
 
-1. `stripe projects` provisions the stack from the terminal: CreateOS and a Postgres database, with credentials written to `.env` *(verify live)*.
+1. `stripe projects` provisions the stack from the terminal: CreateOS and a Postgres database, with credentials written to `.env`.
 2. LeakFinder opens one CreateOS micro-VM with the outbound allowlist set at create time: `api.stripe.com`, the database's IPv4 addresses on its port, and the VM's DNS resolver. Before any model-written code runs, LeakFinder tests the lock from inside: `example.com` and `pypi.org` get no answer and `api.stripe.com` does. The allowlist is in force from the first packet. If the VM's image lacks the two Python libraries, they arrive as wheels built on your machine, so the VM never talks to PyPI.
-3. The model writes Python for your schema, the VM runs it, and only the exit code, counts and error text go back, with email addresses removed. A failing script is rewritten, up to eight turns. A working script is saved for that schema, so the next run on it needs no model turns.
+3. The model writes Python for your schema, the VM runs it, and only the exit code, counts and error text go back, with email addresses removed. A failing script is rewritten, up to eight turns. Findings must also balance: every paid entitlement in the app is either backed by one paying Stripe subscription or listed as unpaid, and every paying subscription either backs one or is listed as having no account. When the counts do not add up, the agent is told the counts (never a row) and rewrites. A working script is saved for that schema, so the next run on it needs no model turns.
 4. Findings are written to a file inside the VM. The report is built from that file.
-5. The model writes a fix script. It runs first with `APPLY` off, which prints a plan and changes nothing (in a fork of the VM with `pnpm apply --fork` on a paid CreateOS plan). The script refuses to act with anything but a Stripe test-mode key, and the CLI and the VM server check that too.
-6. The report is served from inside the sandbox over its public HTTPS URL, behind a random token *(verify live)*. Its **Dry run** and **Apply in test mode** buttons call the VM's own server. Apply runs once per sandbox.
+5. The model writes a fix script. It runs first with `APPLY` off, which prints a plan and changes nothing (in a fork of the VM with `pnpm apply --fork` on a paid CreateOS plan). LeakFinder does not trust the script to honour `APPLY`: the dry run runs under `vm/dryrun.py`, which refuses every Stripe request other than GET before it leaves the VM and makes every database session read-only. A plan that would touch more than the findings hold is rejected. The script refuses to act with anything but a Stripe test-mode key, and the CLI and the VM server check that too.
+6. The report is served from inside the sandbox over its public HTTPS URL, behind a random token: without it the page answers 403. Its **Dry run** and **Apply in test mode** buttons call the VM's own server. Apply runs once per sandbox.
 
 ## Run it
 
 ```bash
 pnpm install
 stripe projects init leakfinder --skip-skills
-stripe projects add createos/project          # (verify live: service ids and env var names)
-stripe projects add neon/postgres
+stripe projects add createos/project          # writes CREATEOS_PROJECT_API_KEY
+stripe projects add neon/postgres             # writes NEON_POSTGRES_CONNECTION_STRING
 stripe projects env --pull                     # writes .env
 # then put a model key (DEEPSEEK_API_KEY or ANTHROPIC_API_KEY) and a Stripe test key (STRIPE_SECRET_KEY=sk_test_...) in .env.local
 pnpm check            # opens a sealed sandbox, proves the seal, reaches Stripe and Postgres from inside, destroys it
@@ -73,9 +73,10 @@ pnpm test        # guard, transcript, loop, report escaping, seed rules, VM serv
 ## What is real and what is not
 
 - **Real:** the agent loop, the CreateOS sandbox and its egress rules, the Stripe test API, the transcript and the grep, the report served from the sandbox *(verify live)*.
+- **Run live from this machine, not yet in the sandbox** (2026-10-18, while the CreateOS daily quota was spent): `pnpm rehearse:host` runs the same agent loop with the room on this machine, against Neon and Stripe test mode, on DeepSeek. In the last nine runs, the audit found 20 of 20 planted cases with 0 extra every time (some after a rewrite the agent made itself), and the fix's dry run planned $203 invoiced to 7, $87 refunded to 3, 12 revoked, 3 cancelled, 5 rows synced. The agent's fix.py then applied for real in test mode, and `pnpm verify:starter` read 0 / 0 / 0; a second apply changed nothing.
 - **Demo data:** every user, team, subscription and the drift itself is seeded by this repo. The main schema is nextjs/saas-starter's, unmodified; the second follows the users/customers/products/prices/subscriptions shape of Vercel's Supabase billing starter, plus an `entitlements` table.
 - **Not claimed:** real money (test mode only); collected payments (invoices are sent, not paid); schemas beyond the two in this repo; that every personal field is caught (email addresses are removed; the prompt keeps other fields out).
-- **Known gaps:** DNS lookups to the VM's resolver are allowed, so a hostile script could leak data through DNS queries. The database credential is the app's own; a read-only role would be safer for the audit. Forking the VM for the dry run needs a paid CreateOS plan; by default the dry run runs in the same VM, which is safe because `APPLY` is off.
+- **Known gaps:** DNS lookups to the VM's resolver are allowed, so a hostile script could leak data through DNS queries. The database credential is the app's own; a read-only role would be safer for the audit. Forking the VM for the dry run needs a paid CreateOS plan; by default the dry run runs in the same VM, which is safe because the dry-run harness refuses writes.
 
 ## Layout
 
@@ -91,7 +92,7 @@ pnpm test        # guard, transcript, loop, report escaping, seed rules, VM serv
 
 ## Built with
 
-- **Stripe Projects:** provisions CreateOS and Postgres from the terminal and writes `.env` *(verify live)*.
+- **Stripe Projects:** provisions CreateOS and Postgres from the terminal and writes `.env`.
 - **CreateOS Sandbox:** the micro-VM where the agent's code runs: egress allowlist, public URL for the report, auto-pause when idle, and fork on a paid plan.
 - **Stripe API, test mode:** reads subscriptions; writes invoices, refunds and cancellations.
 - **The model:** DeepSeek (`deepseek-v4-pro`, the demo's) or Claude (`claude-sonnet-5-5`) writes and repairs the Python. Whichever key is present picks it (Claude if both are); override with `LEAKFINDER_PROVIDER` and `LEAKFINDER_MODEL`. Either way it only ever sees code, schema, counts and errors.

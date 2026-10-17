@@ -54,7 +54,8 @@
     "build": "tsc -p tsconfig.build.json",
     "prepublishOnly": "pnpm build && pnpm test",
     "rehearse": "tsx scripts/rehearse-offline.ts",
-    "rehearse:starter": "tsx scripts/rehearse-starter.ts"
+    "rehearse:starter": "tsx scripts/rehearse-starter.ts",
+    "rehearse:host": "tsx scripts/rehearse-host.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.135.0",
