@@ -1,4 +1,8 @@
-import "dotenv/config";
+import { config } from "dotenv";
+
+// `stripe projects env --pull` rewrites .env, so keys you add by hand (the Stripe
+// test key, the Anthropic key) live in .env.local. Whichever file sets a name first wins.
+config({ path: [".env.local", ".env"], quiet: true });
 
 /**
  * `stripe projects env --pull` names variables per provider (and prefixes them
@@ -6,7 +10,7 @@ import "dotenv/config";
  * to come with before giving up. The canonical name always wins.
  */
 const ALIASES: Record<string, { names: string[]; suffix?: RegExp }> = {
-  CREATEOS_SANDBOX_API_KEY: { names: ["CREATEOS_SANDBOX_API_KEY", "CREATEOS_API_KEY"], suffix: /CREATEOS.*_API_KEY$/ },
+  CREATEOS_SANDBOX_API_KEY: { names: ["CREATEOS_SANDBOX_API_KEY", "CREATEOS_API_KEY", "CREATEOS_PROJECT_API_KEY"], suffix: /CREATEOS.*_API_KEY$/ },
   DATABASE_URL: { names: ["DATABASE_URL", "POSTGRES_URL", "NEON_DATABASE_URL", "PGURL"], suffix: /(_DATABASE_URL|_POSTGRES_URL)$/ },
   STRIPE_SECRET_KEY: { names: ["STRIPE_SECRET_KEY", "STRIPE_API_KEY"] },
   ANTHROPIC_API_KEY: { names: ["ANTHROPIC_API_KEY"] },
