@@ -80,6 +80,8 @@ export class Transcript {
 /** What the agent needs from a coder; tests pass a scripted one. */
 export interface CoderLike {
   ask(user: string): Promise<string>;
+  /** Drop the last question and answer from what the model is shown next; the transcript keeps them. */
+  forgetLast?(): void;
 }
 
 /** The one SDK call Coder makes, injectable so the loop can be tested offline. */
@@ -214,6 +216,14 @@ export class Coder implements CoderLike {
     });
     this.history.push({ role: "assistant", content: kept || "(empty reply)" });
     return raw;
+  }
+
+  /**
+   * A reply with no code block is dropped before the question is asked again: at temperature 0 a model shown its
+   * own sentence-only reply tends to send it again, word for word.
+   */
+  forgetLast(): void {
+    if (this.history.at(-1)?.role === "assistant") this.history.splice(-2, 2);
   }
 
   /**

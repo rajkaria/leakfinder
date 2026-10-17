@@ -55,7 +55,7 @@ Modes
 - First thing: if APPLY is true and STRIPE_SECRET_KEY does not start with "sk_test_" or "rk_test_", print one line saying the key is not a test-mode key and exit with code 3 before touching anything.
 
 What to do per finding (in this order: pro_without_subscription, then payers_without_account, then stale_subscription_rows, so a revoke is counted before a row sync changes the same record)
-- pro_without_subscription: revoke the paid entitlement in the database (the table you found in the audit; set it to the free plan or delete the row, whichever matches how the app represents no paid access). Change only what grants the access, such as the plan; leave subscription id and status columns to the stale_subscription_rows step, which sets them to Stripe's status. If cause is "cancelled_unsynced", stop there: they cancelled in Stripe on purpose, so never bill them. Otherwise (they never paid), bill one month so they can pay to keep access. Find the user's Stripe customer through the app's customer mapping; if there is none, create one with stripe.Customer.create(email=<the user's email from the database>, metadata={"leakfinder_user_id": user_id}). Create the invoice first and attach the item to it (pending items are not pulled into new invoices automatically):
+- pro_without_subscription: revoke the paid entitlement in the database (the table you found in the audit; set it to the free plan or delete the row, whichever matches how the app represents no paid access). Write only the plan column(s) here (plan name, product or price id). Never write the subscription id or status columns in this step, even if the app also reads them for access: the stale_subscription_rows step owns them and sets them to Stripe's status, so the dry run and the apply count the same rows. If cause is "cancelled_unsynced", stop there: they cancelled in Stripe on purpose, so never bill them. Otherwise (they never paid), bill one month so they can pay to keep access. Find the user's Stripe customer through the app's customer mapping; if there is none, create one with stripe.Customer.create(email=<the user's email from the database>, metadata={"leakfinder_user_id": user_id}). Create the invoice first and attach the item to it (pending items are not pulled into new invoices automatically):
     inv = stripe.Invoice.create(customer=cus, collection_method="send_invoice", days_until_due=7, auto_advance=False, metadata={"leakfinder_user_id": user_id}, idempotency_key=...)
     stripe.InvoiceItem.create(customer=cus, invoice=inv.id, amount=monthly_cents, currency="usd", description="Pro plan, one month", idempotency_key=...)
     stripe.Invoice.finalize_invoice(inv.id, idempotency_key=...)
@@ -105,6 +105,14 @@ export interface AuditOutcome {
 
 /** What writeFix needs to know about the audit that ran in this room. */
 const audited = new WeakMap<object, { fp: string | null; fresh: boolean; auditCode?: string }>();
+
+/** Appended once to a question whose answer came back without code; that answer is dropped from the history. */
+const NO_CODE =
+  "Your answer must be one short sentence and then the complete script in one ```python block, closed with ```. A sentence alone is not an answer, and a reply that is too long gets cut off.";
+const askAgain = (coder: CoderLike, prompt: string) => {
+  coder.forgetLast?.();
+  return prompt.includes(NO_CODE) ? prompt : `${prompt}\n\n${NO_CODE}`;
+};
 
 const fenced = (code: string) => `\`\`\`python\n${code.endsWith("\n") ? code : `${code}\n`}\`\`\``;
 const secs = (r: RunResult) => `${(r.ms / 1000).toFixed(1)}s`;
@@ -171,7 +179,8 @@ export function reconcileProblem(f: Findings): string | null {
   const dupes = a.length - new Set(a.map((x) => x.user_id)).size;
   if (dupes) problems.push(`pro_without_subscription repeats ${dupes} user_id value${dupes === 1 ? "" : "s"}; list each paying entity once`);
   const { app_pro_entitlements: e, stripe_active_subscriptions: s } = f.totals;
-  if (e > 0 && s > 0 && e - a.length !== s - f.payers_without_account.length) {
+  // Zero entitlements against paying subscriptions is checked too: it is what a case-sensitive plan match looks like.
+  if ((e > 0 || s > 0) && e - a.length !== s - f.payers_without_account.length) {
     problems.push(
       `the books do not balance: app_pro_entitlements ${e} - pro_without_subscription ${a.length} = ${e - a.length}, but stripe_active_subscriptions ${s} - payers_without_account ${f.payers_without_account.length} = ${s - f.payers_without_account.length}; every entitlement the app grants (paid plan and paying status, whatever Stripe says) is either backed by one active or trialing subscription or is in pro_without_subscription, and every active or trialing subscription either backs one entitlement or is in payers_without_account`,
     );
@@ -291,7 +300,7 @@ export async function runAudit(
       if (!code) {
         rewrites++;
         log(`turn ${turn}: no complete python block in the reply → asking again`);
-        prompt = "No complete ```python block found (a reply that is too long gets cut off). Reply with one short sentence and exactly one complete ```python block.";
+        prompt = askAgain(coder, prompt);
         continue;
       }
       writeFileSync(join(runDir, `turn${turn}.py`), code);
@@ -428,7 +437,7 @@ export async function writeFix(
       payers_without_account: f.payers_without_account.length,
       stale_subscription_rows: f.stale_subscription_rows.length,
       monthly_leak_cents: f.monthly_leak_cents,
-    })}. Write the fix script now. It will be saved as ${FIX_PATH} and dry-run first with APPLY=0.`;
+    })}. Write the fix script now. It will be saved as ${FIX_PATH} and dry-run first with APPLY=0. Reply with one short sentence and then the complete script in one \`\`\`python block.`;
   if (known?.auditCode) {
     // The fix needs the schema the audit learned; the audit script carries it as code, with no data.
     prompt += `\n\nThis is the audit script that wrote ${FINDINGS_PATH}; it shows the tables, columns and matching rules:\n\n${fenced(known.auditCode)}`;
@@ -457,7 +466,7 @@ export async function writeFix(
     const code = pythonBlock(reply);
     if (!code) {
       log(`fix draft ${turn}: no complete python block → asking again`);
-      prompt = "No complete ```python block found. Reply with one short sentence and exactly one complete ```python block.";
+      prompt = askAgain(coder, prompt);
       continue;
     }
     const gap = fixRuleGaps(code);

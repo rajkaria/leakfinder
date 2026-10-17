@@ -368,3 +368,20 @@ test("planProblem: a plan that does more than the findings allow is rejected, co
   const why = agent.planProblem({ ...ok, revoked: 48, invoices: 43, leak_closed_cents: 139200 }, f)!;
   assert.match(why, /revoked 48 > 2 pro_without_subscription; invoices 43 > 2 pro_without_subscription; leak_closed_cents 139200 > monthly_leak_cents 5800/);
 });
+
+test("reconcileProblem: zero entitlements against paying subscriptions does not balance (a case-sensitive plan match)", () => {
+  const f = normalizeFindings({ ...FINDINGS, pro_without_subscription: [], monthly_leak_cents: 0, totals: { app_users: 174, app_pro_entitlements: 0, stripe_active_subscriptions: 39 } });
+  assert.match(reconcileProblem(f)!, /app_pro_entitlements 0 - pro_without_subscription 0 = 0, but stripe_active_subscriptions 39 - payers_without_account 1 = 38/);
+});
+
+test("loop: a reply without code is dropped from the history and the same question is asked again, once marked", async () => {
+  const model = scripted(["I will audit the schema.", "Still just a sentence.", say("Audit.", "AUDIT")]);
+  const out = await runAudit(tmp("run"), () => {}, {}, { openRoom: async () => new FakeRoom() as any, coder: model.make, skills: new SkillStore(tmp("skills")) });
+  assert.equal(out.turns, 3);
+  const [, second, third] = model.seen.map((p) => p.messages);
+  assert.equal(second.length, 1, "the sentence-only exchange is gone from what the model sees");
+  assert.equal(third.length, 1);
+  const asked = JSON.stringify(third[0].content);
+  assert.match(asked, /Start with stage 1/, "the original question, asked again");
+  assert.equal(asked.split("A sentence alone is not an answer").length, 2, "the reminder is added once, not stacked");
+});
