@@ -1,9 +1,33 @@
 import "dotenv/config";
 
-function need(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing ${name} in .env (see .env.example)`);
-  return v;
+/**
+ * `stripe projects env --pull` names variables per provider (and prefixes them
+ * with `--name`), so each credential is looked up under the names it is known
+ * to come with before giving up. The canonical name always wins.
+ */
+const ALIASES: Record<string, { names: string[]; suffix?: RegExp }> = {
+  CREATEOS_SANDBOX_API_KEY: { names: ["CREATEOS_SANDBOX_API_KEY", "CREATEOS_API_KEY"], suffix: /CREATEOS.*_API_KEY$/ },
+  DATABASE_URL: { names: ["DATABASE_URL", "POSTGRES_URL", "NEON_DATABASE_URL", "PGURL"], suffix: /(_DATABASE_URL|_POSTGRES_URL)$/ },
+  STRIPE_SECRET_KEY: { names: ["STRIPE_SECRET_KEY", "STRIPE_API_KEY"] },
+  ANTHROPIC_API_KEY: { names: ["ANTHROPIC_API_KEY"] },
+};
+
+/** Which variable supplies a credential, or null. A suffix match counts only when exactly one variable matches. */
+export function sourceOf(canonical: keyof typeof ALIASES & string, vars: NodeJS.ProcessEnv = process.env): string | null {
+  const a = ALIASES[canonical];
+  const direct = a.names.find((n) => vars[n]);
+  if (direct) return direct;
+  if (!a.suffix) return null;
+  const hits = Object.keys(vars).filter((k) => a.suffix!.test(k) && vars[k]);
+  return hits.length === 1 ? hits[0] : null;
+}
+
+export const CREDENTIALS = Object.keys(ALIASES);
+
+function need(canonical: string): string {
+  const from = sourceOf(canonical);
+  if (!from) throw new Error(`Missing ${canonical} in .env (also looked for ${ALIASES[canonical].names.slice(1).join(", ") || "no other names"}; see .env.example)`);
+  return process.env[from]!;
 }
 
 export const env = {

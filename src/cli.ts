@@ -434,10 +434,20 @@ async function doctor() {
   title("doctor", "credentials, CreateOS, and a sealed sandbox end to end");
   const { env } = await import("./env.js");
   step("Local setup");
-  const names = ["CREATEOS_SANDBOX_API_KEY", "DATABASE_URL", "STRIPE_SECRET_KEY", "ANTHROPIC_API_KEY"];
-  for (const n of names) log(`${n.padEnd(26)} ${process.env[n] ? green("set") : red("missing")}`);
-  const missing = names.filter((n) => !process.env[n]);
+  const { CREDENTIALS, sourceOf } = await import("./env.js");
+  // Every credential at once, with where it came from; values are never printed.
+  for (const n of CREDENTIALS) {
+    const from = sourceOf(n);
+    log(`${n.padEnd(26)} ${from ? green(from === n ? "set" : `set (from ${from})`) : red("missing")}`);
+  }
+  const missing = CREDENTIALS.filter((n) => !sourceOf(n));
   if (missing.length) throw new UserError(`missing ${missing.join(", ")} in .env`);
+  try {
+    const u = new URL(env.databaseUrl());
+    log(`${"database host".padEnd(26)} ${/^postgres(ql)?:$/.test(u.protocol) ? u.hostname : red(`not a postgres URL (${u.protocol})`)}`);
+  } catch {
+    throw new UserError("DATABASE_URL is not a URL");
+  }
   log(`${"Stripe key mode".padEnd(26)} ${/^(sk|rk)_test_/.test(env.stripeKey()) ? green("test mode") : red("not a test key: apply will refuse")}`);
   log(`${"model".padEnd(26)} ${env.model()}`);
   const expected = loadExpected();
