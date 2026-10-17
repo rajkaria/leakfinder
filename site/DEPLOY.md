@@ -1,6 +1,12 @@
 # Deploying the LeakFinder site
 
-`site/index.html` is one static page: no build step, no external requests. `Dockerfile` and `nginx.conf` serve it on port 8080 so CreateOS can run it as an upload project. Nothing here has been deployed yet; every command below is for Raj to run.
+`site/index.html` is one static page: no build step, no external requests. `Dockerfile` and `nginx.conf` serve it on port 8080 so CreateOS can run it as an upload project. The page is live on Vercel (see Next steps). CreateOS hosting (section 1) has not been tried; its commands are for Raj to run.
+
+## Next steps
+
+- Vercel (deployed 04:51 IST, 2026-10-18): https://leakfinder-nu.vercel.app. Production deployment, checked anonymously: 200, the title and hero render, no console errors, and `.env*`, `.vercel`, `DEPLOY.md`, `Dockerfile` and `nginx.conf` all 404. Share this URL only. The other aliases (`leakfinder-rajkaria67-1831s-projects.vercel.app` and each `leakfinder-<hash>-...vercel.app`) redirect to a Vercel login.
+- Redeploy after any change to the page: `cd site && vercel deploy --prod --yes`. `site/` is linked to the Vercel project `leakfinder`; the link lives in `site/.vercel`, which is gitignored, so a fresh checkout links again on its first deploy (pick the existing `leakfinder` project).
+- After the first full audit in the CreateOS sandbox: fill the sample run (section 3), rewrite the "Not run live yet" item in the Status list as "Run live", and redeploy.
 
 Docs references are line numbers in `createos-internal/hackathon/_createos-docs-full.md`. CLI facts come from `createos --help` (v0.0.31, installed at `/opt/homebrew/bin/createos`).
 
@@ -57,13 +63,13 @@ Dashboard route, if the CLI path fails: createos.sh/app, Deploy, **Deploy using 
 (cd site && zip -r ../leakfinder-site.zip index.html Dockerfile nginx.conf)
 ```
 
-## 2. Vercel fallback
+## 2. Vercel (live)
 
 ```bash
-vercel deploy site --prod
+cd site && vercel deploy --prod --yes
 ```
 
-The first run asks to link a project: pick the scope, create a new project named `leakfinder`, keep the directory as is, and accept "Other" with no build command. `.vercelignore` keeps `Dockerfile`, `nginx.conf` and this file out of the upload. Share the production URL the CLI prints (`https://leakfinder-<scope>.vercel.app` or similar), not the per-deployment URL, which Vercel's deployment protection can put behind a login. Check it in a private window.
+The project `leakfinder` already exists, with no framework and no build command; the output is `site/` itself. Without a `site/.vercel` link the CLI asks to link: pick the scope and the existing `leakfinder` project. `vercel link` also writes a `site/.env.local` with a short-lived OIDC token; `site/.gitignore` keeps it out of git and `.vercelignore` keeps it out of the upload, along with `.vercel`, `Dockerfile`, `nginx.conf` and this file. Share https://leakfinder-nu.vercel.app, not the URL the CLI prints: that one is per deployment and sits behind Vercel's login. Check the public URL in a private window after each deploy.
 
 ## 3. After the first live run
 
