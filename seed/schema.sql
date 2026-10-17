@@ -1,7 +1,11 @@
 -- The app's billing tables. Shape follows Vercel's nextjs-subscription-payments
 -- starter (users, customers, products, prices, subscriptions), plus the
 -- `entitlements` table most apps grow once access checks stop trusting the
--- subscriptions table alone.
+-- subscriptions table alone. Access is decided by entitlements.plan; the
+-- subscriptions rows are what the app last heard from Stripe's webhooks.
+--
+-- pnpm seed runs this file, so it starts by dropping these six tables. The seed
+-- refuses to when users holds anyone it did not create.
 drop table if exists entitlements, subscriptions, prices, products, customers, users cascade;
 
 create table users (
@@ -39,6 +43,7 @@ create table subscriptions (
   cancel_at_period_end boolean not null default false,
   updated_at timestamptz not null default now()
 );
+create index subscriptions_user_id on subscriptions(user_id);
 
 create table entitlements (
   user_id uuid primary key references users(id),
