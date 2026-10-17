@@ -166,6 +166,8 @@ export class Coder implements CoderLike {
       cache_control: { type: "ephemeral" },
       messages: this.history,
     };
+    const effort = env.effort();
+    if (effort) params.output_config = { effort };
     if (!this.fallbacks) return this.create(params);
     try {
       return await this.create({ ...params, betas: [FALLBACK_BETA], fallbacks: "default" });

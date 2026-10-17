@@ -18,6 +18,8 @@ export interface ReportOpts {
   live?: boolean;
   /** The seed's canary email, for the grep line. */
   canary?: string | null;
+  /** The seeded schema's source, e.g. nextjs/saas-starter@<sha>, shown with the answer key. */
+  schema?: string | null;
   /** When the summary was applied (ISO). */
   appliedAt?: string | null;
   /** Set when the agent could not produce a working fix script; replaces the buttons. */
@@ -412,7 +414,10 @@ function records(letter: string, tone: Tone, title: string, rows: any[], cols: P
 
 const mono = (v: unknown) => `<span class="mono">${esc(v)}</span>`;
 
-function scorePanel(score: Score) {
+/** nextjs/saas-starter@6e33e58b… → nextjs/saas-starter@6e33e58 */
+const schemaLabel = (s: string) => s.replace(/@([0-9a-f]{7})[0-9a-f]+$/, "@$1");
+
+function scorePanel(score: Score, schema: string | null = null) {
   const t = scoreTotals(score);
   const clean = t.found === t.planted && t.extra === 0;
   const row = (letter: string, tone: Tone, label: string, p: { found: number; planted: number; extra: number }) => {
@@ -421,7 +426,7 @@ function scorePanel(score: Score) {
   };
   const leakOk = score.leak_cents.found === score.leak_cents.planted;
   return `<section class="panel score" aria-labelledby="score-h">
-<div class="panel-head"><h2 id="score-h">Checked against the answer key</h2><span class="muted">seed/expected.json lists every case the seed planted</span></div>
+<div class="panel-head"><h2 id="score-h">Checked against the answer key</h2><span class="muted">seed/expected.json lists every case the seed planted${schema ? ` · schema ${esc(schemaLabel(schema))}, unmodified` : ""}</span></div>
 <div class="verdict ${clean ? "ok" : "miss"}"><span class="ic">${clean ? icon.check : icon.cross}</span><span>${num(t.found)} of ${num(t.planted)} planted found</span><span class="sep">·</span><span class="x">${pl(t.extra, "extra", "extra")}</span></div>
 <div class="bars">
 ${row("A", "leak", "Pro access nobody pays for", score.pro_without_subscription)}
@@ -612,7 +617,7 @@ export function renderReport(f: Findings, meta: RunMeta, opts: ReportOpts = {}):
 ${cards}
 </section>
 ${recoverPanel(opts)}
-${opts.score ? scorePanel(opts.score) : ""}
+${opts.score ? scorePanel(opts.score, opts.schema ?? null) : ""}
 <h2 class="section-title">The records</h2>
 ${detail}
 ${provenance(meta, canary)}

@@ -110,6 +110,8 @@ interface RunRecord {
   meta: RunMeta;
   score: Score | null;
   canary: string | null;
+  /** The seeded schema, from seed/expected.json (e.g. nextjs/saas-starter@<sha>), when the seed names one. */
+  schema?: string | null;
   summary: FixSummary | null;
   appliedAt: string | null;
   fixError: string | null;
@@ -160,6 +162,7 @@ const reportOpts = (rec: RunRecord, live: boolean): ReportOpts => ({
   summary: rec.summary,
   live,
   canary: rec.canary,
+  schema: rec.schema ?? null,
   appliedAt: rec.appliedAt,
   fixError: rec.fixError,
 });
@@ -261,7 +264,8 @@ async function audit(demo: boolean) {
   };
 
   step("Report");
-  const rec: RunRecord = { meta, score, canary, summary: plan, appliedAt: null, fixError };
+  const schema = typeof expected?.schema === "string" && expected.schema ? (expected.schema as string) : null;
+  const rec: RunRecord = { meta, score, canary, schema, summary: plan, appliedAt: null, fixError };
   saveRecord(runDir, rec);
   const local = writeReport(runDir, f, meta, reportOpts(rec, false));
   log(`local copy: ${local}`);
@@ -269,6 +273,13 @@ async function audit(demo: boolean) {
   try {
     url = (await out.room.serveReport({ html: renderReport(f, meta, reportOpts(rec, true)), token })).url;
     log("served from inside the sandbox; the link carries its access token");
+    const idle = env.autoPauseSeconds();
+    if (idle > 0) {
+      await out.room.enableAutoPause(idle).then(
+        () => log(dim(`the sandbox pauses itself after ${Math.round(idle / 60)} min idle and stops billing; opening the link wakes it`)),
+        (e) => log(yellow(`auto-pause not set: ${msg(e)}`)),
+      );
+    }
   } catch (e) {
     log(yellow(`could not serve from the sandbox: ${msg(e)}`));
     log(`open the local copy instead: ${local}`);
@@ -330,8 +341,9 @@ async function apply() {
     } else {
       try {
         log(`forking ${room.id}: the dry run happens in a copy, the original stays untouched`);
+        const t = Date.now();
         fork = await room.pauseAndFork();
-        log(`fork ${fork.id} running`);
+        log(`fork ${fork.id} running · ${((Date.now() - t) / 1000).toFixed(1)}s to pause, snapshot, clone and resume the original`);
       } catch (e) {
         log(yellow(`no fork: ${msg(e)}`));
         log("dry run in the original instead; APPLY=0 changes nothing");
