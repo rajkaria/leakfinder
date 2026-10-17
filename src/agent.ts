@@ -36,7 +36,7 @@ Rules that are enforced on you:
    "monthly_leak_cents": int, "totals": {"app_users": int, "app_pro_entitlements": int, "stripe_active_subscriptions": int}}
   monthly_leak_cents is the sum of monthly_cents over pro_without_subscription. totals.stripe_active_subscriptions counts subscriptions whose status is active or trialing.
 - When the file is written and the counts printed, print the line ${DONE} as the last line. Only do that from a script that runs the whole audit from scratch on its own: that final script is saved and re-run as-is on the next audit of this schema.
-- Stripe: set stripe.api_key = os.environ["STRIPE_SECRET_KEY"]. Read every subscription with stripe.Subscription.list(status="all", limit=100).auto_paging_iter(); sub.customer is the customer id. Only status active and trialing count as paying. On the current API, current_period_end lives on subscription items (sub["items"].data[0].current_period_end), not on the subscription; read price amounts from sub["items"].data[i].price.unit_amount times quantity, per month. A pro user with no Stripe subscription is still worth the plan's monthly price: take it from the app's own price data, or, if the app stores none, from the active Stripe price of that plan (stripe.Price.list(active=True)).
+- Stripe: set stripe.api_key = os.environ["STRIPE_SECRET_KEY"]. Read every subscription with stripe.Subscription.list(status="all", limit=100).auto_paging_iter(); sub.customer is the customer id. stripe-python objects are not dicts: use attribute or [] access (sub.status, sub["items"].data, obj.metadata["k"] after checking "k" in obj.metadata), never obj.get(...). Only status active and trialing count as paying. On the current API, current_period_end lives on subscription items (sub["items"].data[0].current_period_end), not on the subscription; read price amounts from sub["items"].data[i].price.unit_amount times quantity, per month. A pro user with no Stripe subscription is still worth the plan's monthly price: take it from the app's own price data, or, if the app stores none, from the active Stripe price of that plan (stripe.Price.list(active=True)).
 - A "pro entitlement" is whatever the app uses to grant paid access; discover it from the schema first. Never write to the database or to Stripe during the audit.
 - What each list holds:
   pro_without_subscription: every paid entitlement the app grants (a paid plan with a status the app treats as paying) that has no active or trialing Stripe subscription behind it. cause "never_paid": the app links no Stripe subscription, or one Stripe does not have; "cancelled_unsynced": the linked subscription is canceled in Stripe while the app still grants access. If the app bills per team, account or organization, list one entry per paying entity, never one per member: user_id is that entity's id and email its owner's. monthly_cents is the plan's monthly price and never 0: match the app's stored product or price id, or its plan name against the Stripe Product name (stripe.Price.list(active=True, expand=["data.product"])).
@@ -159,7 +159,9 @@ export function checkFindings(text: string | null): { findings: Findings } | { p
 
 /**
  * Counts-only sanity checks on valid findings: a list that cannot be right on any schema. The message names
- * counts, never a value, so it can go back to the model. The loop raises it once; a second pass is accepted.
+ * counts, never a value, so it can go back to the model. The loop raises it on every changed script and accepts
+ * findings that do not reconcile only when the agent resends the same script (real data can have two
+ * subscriptions per customer).
  */
 export function reconcileProblem(f: Findings): string | null {
   const a = f.pro_without_subscription;
@@ -171,7 +173,7 @@ export function reconcileProblem(f: Findings): string | null {
   const { app_pro_entitlements: e, stripe_active_subscriptions: s } = f.totals;
   if (e > 0 && s > 0 && e - a.length !== s - f.payers_without_account.length) {
     problems.push(
-      `the books do not balance: app_pro_entitlements ${e} - pro_without_subscription ${a.length} = ${e - a.length}, but stripe_active_subscriptions ${s} - payers_without_account ${f.payers_without_account.length} = ${s - f.payers_without_account.length}; check both sides count paying entities the same way`,
+      `the books do not balance: app_pro_entitlements ${e} - pro_without_subscription ${a.length} = ${e - a.length}, but stripe_active_subscriptions ${s} - payers_without_account ${f.payers_without_account.length} = ${s - f.payers_without_account.length}; every entitlement the app grants (paid plan and paying status, whatever Stripe says) is either backed by one active or trialing subscription or is in pro_without_subscription, and every active or trialing subscription either backs one entitlement or is in payers_without_account`,
     );
   }
   return problems.length ? problems.join("; ") : null;
@@ -280,7 +282,7 @@ export async function runAudit(
 
     const coder = (deps.coder ?? ((s, t) => new Coder(s, t)))(SYSTEM, transcript);
     let rewrites = 0;
-    let reconciled = false;
+    let rejected: string | null = null;
     for (let turn = 1; turn <= MAX_TURNS; turn++) {
       const reply = await coder.ask(prompt);
       const intent = intentLine(reply);
@@ -297,9 +299,10 @@ export async function runAudit(
       const a = await attempt(room, `${WORKDIR}/turn${turn}.py`, code);
       redacted += a.out.report.emailsRedacted;
       logGuard(log, `turn ${turn}`, a.out.report);
-      const off = a.ok && !reconciled && turn < MAX_TURNS ? reconcileProblem(a.findings) : null;
+      // A resend of the script that was just rejected is the agent saying the counts are right for this schema.
+      const off = a.ok && code !== rejected && turn < MAX_TURNS ? reconcileProblem(a.findings) : null;
       if (a.ok && off) {
-        reconciled = true;
+        rejected = code;
         rewrites++;
         log(`turn ${turn}: exit 0 · ${secs(a.r)} · ${DONE} · counts do not reconcile → agent rewriting`);
         prompt =
@@ -363,7 +366,23 @@ export async function runDryRun(room: Pick<Room, "upload" | "runPython">): Promi
   return room.runPython(DRYRUN_PATH, { APPLY: "0" });
 }
 
-async function dryRun(room: Room, code: string): Promise<FixRun> {
+/** A plan that does more than the findings allow is wrong whatever the schema: counts only, safe to show the model. */
+export function planProblem(p: FixSummary, f: Findings): string | null {
+  const a = f.pro_without_subscription.length;
+  const b = f.payers_without_account.length;
+  const c = f.stale_subscription_rows.length;
+  const over = [
+    p.revoked > a ? `revoked ${p.revoked} > ${a} pro_without_subscription` : "",
+    p.invoices > a ? `invoices ${p.invoices} > ${a} pro_without_subscription` : "",
+    p.refunds > b ? `refunds ${p.refunds} > ${b} payers_without_account` : "",
+    p.cancelled > b ? `cancelled ${p.cancelled} > ${b} payers_without_account` : "",
+    p.rows_synced > c ? `rows_synced ${p.rows_synced} > ${c} stale_subscription_rows` : "",
+    p.leak_closed_cents > f.monthly_leak_cents ? `leak_closed_cents ${p.leak_closed_cents} > monthly_leak_cents ${f.monthly_leak_cents}` : "",
+  ].filter(Boolean);
+  return over.length ? `the plan does more than the findings allow: ${over.join("; ")}` : null;
+}
+
+async function dryRun(room: Room, code: string, f?: Findings): Promise<FixRun> {
   const gap = fixRuleGaps(code);
   if (gap) return { r: { stdout: "", stderr: "", exit_code: 0, ms: 0 }, out: guard(""), plan: null, why: gap };
   await room.upload(FIX_PATH, code);
@@ -374,6 +393,7 @@ async function dryRun(room: Room, code: string): Promise<FixRun> {
   if (r.exit_code !== 0) why = errorLine(r);
   else if (!plan) why = `exit 0 but the last line was not ${SUMMARY_MARKER} {json}`;
   else if (plan.mode !== "dry_run") why = `the dry run reported mode "${plan.mode}"; with APPLY unset it must be "dry_run" and change nothing`;
+  else if (f) why = planProblem(plan, f);
   return { r, out, plan, why };
 }
 
@@ -417,7 +437,7 @@ export async function writeFix(
   const saved = fp && !fresh ? store.fix(fp) : null;
   if (fp && saved) {
     log(`saved fix found for this schema · dry run of skills/${fp}.fix.py`);
-    const run = await dryRun(room, saved);
+    const run = await dryRun(room, saved, f);
     if (!run.why) {
       log(`fix (saved): dry run exit 0 · ${secs(run.r)} · ${summaryLine(run.plan!)}`);
       transcript.log({ kind: "skill", fingerprint: fp, note: "saved fix script dry run passed; no model call was made" });
@@ -447,7 +467,7 @@ export async function writeFix(
       continue;
     }
     log(`fix draft ${turn}: dry run of ${code.trimEnd().split("\n").length} lines with APPLY=0`);
-    const run = await dryRun(room, code);
+    const run = await dryRun(room, code, f);
     if (!run.why) {
       log(`fix draft ${turn}: exit 0 · ${secs(run.r)} · ${summaryLine(run.plan!)}`);
       if (fp) {

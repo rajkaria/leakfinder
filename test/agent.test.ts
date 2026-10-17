@@ -337,7 +337,17 @@ test("loop: findings that do not reconcile get one rewrite with counts only, the
   assert.match(told, /the books do not balance/);
   assert.ok(!told.includes(CANARY));
 
-  // Raised once only: a second unbalanced pass is accepted (real data can have two subscriptions per customer).
+  // A changed script that still does not balance is rejected again; the right one is then accepted.
+  const twice = scripted([say("Audit per member.", "PER_MEMBER"), say("Count per member differently.", "PER_MEMBER v2"), say("Audit per team.", "AUDIT")]);
+  const lines3: string[] = [];
+  const out3 = await runAudit(tmp("run"), (l) => lines3.push(l), {}, { openRoom: async () => new FakeRoom() as any, coder: twice.make, skills: new SkillStore(tmp("skills")) });
+  assert.equal(out3.turns, 3);
+  assert.equal(out3.rewrites, 2);
+  assert.equal(out3.findings.pro_without_subscription.length, 2);
+  assert.equal(lines3.filter((l) => l.includes("counts do not reconcile")).length, 2);
+
+  // The agent resending the rejected script unchanged means it stands by the counts (real data can have two
+  // subscriptions per customer): accepted.
   const again = scripted([say("Audit per member.", "PER_MEMBER"), say("Same script: the counts are right here.", "PER_MEMBER")]);
   const out2 = await runAudit(tmp("run"), () => {}, {}, { openRoom: async () => new FakeRoom() as any, coder: again.make, skills: new SkillStore(tmp("skills")) });
   assert.equal(out2.turns, 2);
@@ -349,4 +359,12 @@ test("fixRuleGaps: idempotency keys must carry the findings hash, so a re-seed c
   const ok = `APPLY = os.environ.get("APPLY") == "1"\n# sk_test_ rk_test_\nRUN = hashlib.sha256(open(p, "rb").read()).hexdigest()[:12]\nstripe.Invoice.create(idempotency_key=f"leakfinder-{RUN}-invoice-{u}")\nprint("LEAKFINDER_SUMMARY {}")`;
   assert.equal(fixRuleGaps(ok), null);
   assert.match(fixRuleGaps(ok.replace(/RUN = .*\n/, "").replace("{RUN}-", ""))!, /do not include the hash of the findings file/);
+});
+
+test("planProblem: a plan that does more than the findings allow is rejected, counts only", () => {
+  const f = normalizeFindings(FINDINGS);
+  const ok = { mode: "dry_run" as const, revoked: 2, invoices: 1, invoiced_cents: 2900, refunds: 1, refunded_cents: 2900, cancelled: 1, rows_synced: 1, leak_closed_cents: 5800 };
+  assert.equal(agent.planProblem(ok, f), null);
+  const why = agent.planProblem({ ...ok, revoked: 48, invoices: 43, leak_closed_cents: 139200 }, f)!;
+  assert.match(why, /revoked 48 > 2 pro_without_subscription; invoices 43 > 2 pro_without_subscription; leak_closed_cents 139200 > monthly_leak_cents 5800/);
 });
