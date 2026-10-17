@@ -43,7 +43,7 @@ stripe projects init leakfinder --skip-skills
 stripe projects add createos/project          # (verify live: service ids and env var names)
 stripe projects add neon/postgres
 stripe projects env --pull                     # writes .env
-# then add ANTHROPIC_API_KEY and a Stripe test key (STRIPE_SECRET_KEY=sk_test_...) to .env
+# then put a model key (DEEPSEEK_API_KEY or ANTHROPIC_API_KEY) and a Stripe test key (STRIPE_SECRET_KEY=sk_test_...) in .env.local
 pnpm check            # opens a sealed sandbox, proves the seal, reaches Stripe and Postgres from inside, destroys it
 pnpm seed:starter     # nextjs/saas-starter's schema with planted drift (src/starters/saas-starter.ts says what)
 pnpm verify:starter   # independent count: 12 / 3 / 5 and $348 a month
@@ -94,7 +94,7 @@ pnpm test        # guard, transcript, loop, report escaping, seed rules, VM serv
 - **Stripe Projects:** provisions CreateOS and Postgres from the terminal and writes `.env` *(verify live)*.
 - **CreateOS Sandbox:** the micro-VM where the agent's code runs: egress allowlist, public URL for the report, pause and fork.
 - **Stripe API, test mode:** reads subscriptions; writes invoices, refunds and cancellations.
-- **Claude (`claude-sonnet-5-5`):** writes and repairs the Python. Override with `LEAKFINDER_MODEL`.
+- **The model:** DeepSeek (`deepseek-chat`, the demo's) or Claude (`claude-sonnet-5-5`) writes and repairs the Python. Whichever key is present picks it; override with `LEAKFINDER_PROVIDER` and `LEAKFINDER_MODEL`. Either way it only ever sees code, schema, counts and errors.
 - **TypeScript on Node** for the orchestrator, **Python 3.12** inside the VM.
 
 ## Built with AI assistance

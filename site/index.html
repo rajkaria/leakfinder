@@ -351,19 +351,19 @@ td.m{color:var(--muted)}
         <!-- Wide layout, 760 px and up -->
         <svg class="dg-wide" viewBox="0 0 1080 420" role="img" aria-labelledby="dgw-t dgw-d">
           <title id="dgw-t">The sealed room</title>
-          <desc id="dgw-d">Claude, outside the VM, exchanges text with your laptop: it receives code, schema, counts and errors, and sends back Python. Your laptop runs the LeakFinder CLI, redacts emails and keeps the transcript. The laptop sends the script into a CreateOS micro-VM and gets counts and errors back. The VM has an egress allowlist: api.stripe.com and the database host are allowed, anything else is dropped. Findings go to a file inside the VM and are never sent to the model.</desc>
+          <desc id="dgw-d">The model, outside the VM, exchanges text with your laptop: it receives code, schema, counts and errors, and sends back Python. Your laptop runs the LeakFinder CLI, redacts emails and keeps the transcript. The laptop sends the script into a CreateOS micro-VM and gets counts and errors back. The VM has an egress allowlist: api.stripe.com and the database host are allowed, anything else is dropped. Findings go to a file inside the VM and are never sent to the model.</desc>
           <defs>
             <marker id="mw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="hd" d="M0 0L10 5L0 10z"/></marker>
             <marker id="mwok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="hd-ok" d="M0 0L10 5L0 10z"/></marker>
           </defs>
 
-          <!-- Claude -->
+          <!-- the model -->
           <rect class="mdl" x="10" y="140" width="190" height="130" rx="16"/>
-          <text class="t1" x="105" y="178" text-anchor="middle">Claude</text>
+          <text class="t1" x="105" y="178" text-anchor="middle">The model</text>
           <text class="t2" x="105" y="200" text-anchor="middle">the model, outside the VM</text>
           <text class="t2" x="105" y="230" text-anchor="middle">sees no customer rows</text>
 
-          <!-- Claude <-> laptop -->
+          <!-- model <-> laptop -->
           <text class="tl" x="268" y="168" text-anchor="middle">code, schema,</text>
           <text class="tl" x="268" y="184" text-anchor="middle">counts, errors</text>
           <line class="ar" x1="328" y1="196" x2="206" y2="196" marker-end="url(#mw)"/>
@@ -417,14 +417,14 @@ td.m{color:var(--muted)}
         <!-- Tall layout, under 760 px -->
         <svg class="dg-tall" viewBox="0 0 360 760" role="img" aria-labelledby="dgt-t dgt-d">
           <title id="dgt-t">The sealed room</title>
-          <desc id="dgt-d">Claude, outside the VM, receives code, schema, counts and errors from your laptop and sends back Python. Your laptop runs the LeakFinder CLI, redacts emails and keeps the transcript. It sends the script into a CreateOS micro-VM and gets counts and errors back. The VM can reach api.stripe.com and the database host; anything else is dropped. Findings go to a file inside the VM and are never sent to the model.</desc>
+          <desc id="dgt-d">The model, outside the VM, receives code, schema, counts and errors from your laptop and sends back Python. Your laptop runs the LeakFinder CLI, redacts emails and keeps the transcript. It sends the script into a CreateOS micro-VM and gets counts and errors back. The VM can reach api.stripe.com and the database host; anything else is dropped. Findings go to a file inside the VM and are never sent to the model.</desc>
           <defs>
             <marker id="mt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="hd" d="M0 0L10 5L0 10z"/></marker>
             <marker id="mtok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="hd-ok" d="M0 0L10 5L0 10z"/></marker>
           </defs>
 
           <rect class="mdl" x="20" y="8" width="320" height="84" rx="16"/>
-          <text class="t1" x="180" y="40" text-anchor="middle">Claude</text>
+          <text class="t1" x="180" y="40" text-anchor="middle">The model</text>
           <text class="t2" x="180" y="62" text-anchor="middle">the model, outside the VM</text>
           <text class="t2" x="180" y="80" text-anchor="middle">sees no customer rows</text>
 
@@ -536,7 +536,7 @@ td.m{color:var(--muted)}
         <div class="tile"><b>CreateOS Sandbox</b><span>The micro-VM where the agent's code runs, with an egress allowlist.</span></div>
         <div class="tile"><b>Stripe API, test mode</b><span>Reads every subscription. Apply sends invoices, refunds and cancellations.</span></div>
         <div class="tile"><b>Neon Postgres via Stripe Projects</b><span>The app's database: users, subscriptions, entitlements.</span></div>
-        <div class="tile"><b>Claude</b><span>Writes the Python and rewrites it when a query fails.</span></div>
+        <div class="tile"><b>DeepSeek or Claude</b><span>The model writes the Python and rewrites it when a query fails. The demo runs on DeepSeek.</span></div>
       </div>
     </section>
 
