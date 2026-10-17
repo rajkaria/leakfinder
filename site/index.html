@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<title>LeakFinder: an AI agent that finds money leaking between Stripe and your database</title>
+<meta name="description" content="LeakFinder is an AI agent that finds money leaking between Stripe and your database. It writes its own code and runs it in a sealed CreateOS sandbox.">
+<meta property="og:title" content="LeakFinder">
+<meta property="og:description" content="An AI agent that finds money leaking between Stripe and your database. It writes its own code and runs it in a sealed CreateOS sandbox.">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#090b0f" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M12%202.4c-3.7%204.7-6.6%208.4-6.6%2011.9a6.6%206.6%200%200%200%2013.2%200c0-3.5-2.9-7.2-6.6-11.9Z%22%20fill%3D%22%23e5484d%22%2F%3E%3C%2Fsvg%3E">
+<style>
+/* Same tokens as the in-sandbox report (src/report.ts) so the site and the report read as one product. */
+:root{color-scheme:light;
+  --bg:#f4f5f7; --surface:#ffffff; --sunken:#eef0f3; --line:#e1e4e9; --line-2:#cfd4dc;
+  --text:#0b1220; --muted:#4f5969; --faint:#7a8291;
+  --leak:#c8261a; --leak-soft:#fdeceb; --warn:#9a5500; --warn-soft:#fdf2df; --cool:#3a4bd6; --cool-soft:#eceefe;
+  --ok:#067a4b; --ok-soft:#e5f6ed;
+  --shadow:0 1px 2px rgba(16,24,40,.05),0 8px 24px rgba(16,24,40,.06);
+  --btn:#0b1220; --btn-text:#ffffff;
+  --term:#0b0e13; --term-text:#d7dce4; --term-dim:#8a93a2;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;
+  --bg:#090b0f; --surface:#11141a; --sunken:#0c0f14; --line:#222833; --line-2:#323a48;
+  --text:#ebeef3; --muted:#a3acba; --faint:#7d8696;
+  --leak:#ff6b5e; --leak-soft:#2b1311; --warn:#f1b157; --warn-soft:#2a1d0a; --cool:#8f9cff; --cool-soft:#171a33;
+  --ok:#3fd394; --ok-soft:#0c2219;
+  --shadow:0 1px 0 rgba(255,255,255,.03) inset;
+  --btn:#ebeef3; --btn-text:#0b1220;
+  --term:#05070a; --term-text:#d7dce4; --term-dim:#8a93a2;
+}}
+:root[data-theme="dark"]{color-scheme:dark;
+  --bg:#090b0f; --surface:#11141a; --sunken:#0c0f14; --line:#222833; --line-2:#323a48;
+  --text:#ebeef3; --muted:#a3acba; --faint:#7d8696;
+  --leak:#ff6b5e; --leak-soft:#2b1311; --warn:#f1b157; --warn-soft:#2a1d0a; --cool:#8f9cff; --cool-soft:#171a33;
+  --ok:#3fd394; --ok-soft:#0c2219;
+  --shadow:0 1px 0 rgba(255,255,255,.03) inset;
+  --btn:#ebeef3; --btn-text:#0b1220;
+  --term:#05070a; --term-text:#d7dce4; --term-dim:#8a93a2;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1}
+code,pre,.mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace}
+a{color:inherit}
+:focus-visible{outline:2px solid var(--cool);outline-offset:3px;border-radius:6px}
+.wrap{max-width:1160px;margin:0 auto;padding:0 16px}
+@media (min-width:720px){.wrap{padding:0 32px}}
+h1,h2,h3{margin:0;letter-spacing:-.02em;line-height:1.15}
+p{margin:0}
+.skip{position:absolute;left:-9999px;top:8px;background:var(--surface);padding:8px 12px;border-radius:8px;z-index:10}
+.skip:focus{left:16px}
+
+/* Header */
+.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 0}
+.brand{display:inline-flex;align-items:center;gap:9px;font-weight:780;font-size:18px;letter-spacing:-.025em;text-decoration:none}
+.brand svg{color:var(--leak);flex:none}
+.nav{display:flex;align-items:center;gap:6px}
+.nav a.lnk{display:none;padding:8px 12px;border-radius:10px;font-size:14.5px;font-weight:550;color:var(--muted);text-decoration:none}
+.nav a.lnk:hover{color:var(--text);background:var(--sunken)}
+@media (min-width:860px){.nav a.lnk{display:inline-block}}
+.gh{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:10px;border:1px solid var(--line-2);background:var(--surface);font-size:14.5px;font-weight:600;text-decoration:none}
+.gh:hover{border-color:var(--text)}
+
+/* Hero */
+.hero{display:grid;gap:40px;padding:40px 0 64px;align-items:center}
+@media (min-width:1000px){.hero{grid-template-columns:minmax(0,1.22fr) minmax(0,1fr);gap:56px;padding:64px 0 96px}}
+.eyebrow{display:inline-flex;align-items:center;gap:9px;font-size:12.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.eyebrow i{width:8px;height:8px;border-radius:50%;background:var(--leak);flex:none}
+.hero h1{margin:18px 0 0;font-size:clamp(36px,5.2vw,62px);font-weight:820;letter-spacing:-.04em;line-height:1.04;text-wrap:balance}
+.hero h1 em{font-style:normal;color:var(--leak)}
+.lede{margin-top:20px;font-size:clamp(18px,2vw,22px);line-height:1.45;font-weight:560;letter-spacing:-.01em}
+.for{margin-top:12px;font-size:17px;color:var(--muted);max-width:560px}
+.install{margin-top:28px;display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px}
+.cmd{display:inline-flex;align-items:center;gap:12px;padding:13px 18px;border-radius:12px;background:var(--term);color:var(--term-text);font-size:15.5px;border:1px solid var(--line);max-width:100%}
+.cmd .p{color:var(--term-dim);user-select:none}
+.cmd code{white-space:nowrap}
+.tag{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;color:var(--warn);background:var(--warn-soft);padding:5px 11px;border-radius:999px}
+.tag i{width:6px;height:6px;border-radius:50%;background:currentColor}
+.ctas{margin-top:24px;display:flex;flex-wrap:wrap;gap:12px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:9px;min-height:46px;padding:0 20px;border-radius:12px;font-weight:650;font-size:15.5px;text-decoration:none;border:1px solid transparent}
+.btn-primary{background:var(--btn);color:var(--btn-text)}
+.btn-primary:hover{opacity:.9}
+.btn-ghost{border-color:var(--line-2);background:var(--surface)}
+.btn-ghost:hover{border-color:var(--text)}
+.note{margin-top:14px;font-size:14px;color:var(--muted)}
+
+/* Answer-key card in the hero: the seed's planted numbers, labelled as such */
+.key{margin:0;background:var(--surface);border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow);overflow:hidden;min-width:0}
+.key-top{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 20px;border-bottom:1px solid var(--line);font-size:13px;color:var(--muted)}
+.key-top b{color:var(--text);font-weight:650}
+.dots{display:inline-flex;gap:6px}
+.dots i{width:10px;height:10px;border-radius:50%;background:var(--line-2)}
+.key-body{padding:24px 22px 8px}
+@media (min-width:720px){.key-body{padding:28px 28px 10px}}
+.key-label{font-size:12.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--leak)}
+.amt{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin:8px 0 4px}
+.amt b{font-size:clamp(56px,8vw,84px);font-weight:830;letter-spacing:-.05em;line-height:.95;color:var(--leak)}
+.amt span{font-size:clamp(20px,2.4vw,26px);font-weight:700;letter-spacing:-.02em}
+.key-sub{font-size:14.5px;color:var(--muted)}
+.rows{list-style:none;margin:20px 0 0;padding:0}
+.rows li{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;padding:13px 0;border-top:1px solid var(--line)}
+.letter{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:9px;font-weight:800;font-size:14px}
+.tone-leak{background:var(--leak-soft);color:var(--leak)}
+.tone-warn{background:var(--warn-soft);color:var(--warn)}
+.tone-cool{background:var(--cool-soft);color:var(--cool)}
+.rows .what{font-weight:600;font-size:15px;line-height:1.3}
+.rows .what small{display:block;font-weight:450;font-size:13px;color:var(--muted);margin-top:2px}
+.rows .n{font-size:24px;font-weight:780;letter-spacing:-.03em}
+.key-foot{padding:14px 22px 18px;font-size:13px;color:var(--muted);background:var(--sunken);border-top:1px solid var(--line)}
+@media (min-width:720px){.key-foot{padding:14px 28px 18px}}
+
+/* Sections */
+.section{padding:72px 0;border-top:1px solid var(--line)}
+@media (min-width:720px){.section{padding:96px 0}}
+.kicker{font-size:12.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.section h2{margin-top:10px;font-size:clamp(28px,3.6vw,42px);font-weight:800;letter-spacing:-.035em;max-width:760px;text-wrap:balance}
+.section .intro{margin-top:14px;font-size:18px;color:var(--muted);max-width:680px}
+
+/* Beats */
+.beats{margin-top:48px;display:grid;gap:20px}
+.beat{display:grid;gap:22px;background:var(--surface);border:1px solid var(--line);border-radius:22px;padding:24px 20px;box-shadow:var(--shadow);min-width:0}
+@media (min-width:720px){.beat{padding:32px}}
+@media (min-width:1000px){.beat{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:40px;align-items:center;padding:40px}}
+.num{display:inline-grid;place-items:center;width:34px;height:34px;border-radius:10px;background:var(--text);color:var(--bg);font-weight:800;font-size:15px}
+.beat h3{margin-top:16px;font-size:clamp(22px,2.4vw,28px);font-weight:780;letter-spacing:-.025em}
+.beat p{margin-top:12px;color:var(--muted);font-size:16.5px}
+.beat p b{color:var(--text);font-weight:640}
+.allow{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.allow li{display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:14px;border:1px solid var(--line);background:var(--sunken);font-size:15px;min-width:0}
+.allow code{font-size:14.5px;overflow-wrap:anywhere}
+.allow .st{margin-left:auto;flex:none;font-size:12.5px;font-weight:700;padding:3px 10px;border-radius:999px}
+.allow .yes{color:var(--ok);background:var(--ok-soft)}
+.allow .no{color:var(--leak);background:var(--leak-soft)}
+.allow li.blocked{border-style:dashed;color:var(--muted)}
+.ico{flex:none;width:22px;height:22px}
+.term{margin:0;padding:18px 20px;border-radius:14px;background:var(--term);color:var(--term-text);font-size:14.5px;line-height:1.7;overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line)}
+.term .p{color:var(--term-dim);user-select:none}
+.term .c{color:var(--term-dim)}
+.term .z{color:#3fd394;font-weight:700}
+.cap{margin-top:10px;font-size:13.5px;color:var(--muted)}
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:10px;counter-reset:s}
+.steps li{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;padding:14px 16px;border-radius:14px;border:1px solid var(--line);background:var(--sunken)}
+.steps .k{grid-row:span 2;align-self:start;font-size:12px;font-weight:750;letter-spacing:.06em;text-transform:uppercase;padding:4px 9px;border-radius:8px;background:var(--surface);border:1px solid var(--line);white-space:nowrap}
+.steps .t{font-weight:640;font-size:15px}
+.steps .d{font-size:14px;color:var(--muted)}
+.steps li.zero .k{color:var(--ok);background:var(--ok-soft);border-color:transparent}
+.steps code{font-size:13.5px}
+@media (max-width:480px){
+  .allow li{padding:12px 14px;gap:10px}
+  .allow code{font-size:13.5px;overflow-wrap:normal;white-space:nowrap}
+  .term{padding:14px 16px;font-size:12px;white-space:pre;overflow-wrap:normal}
+  .steps li{grid-template-columns:1fr}
+  .steps .k{grid-row:auto;justify-self:start;margin-bottom:6px}
+}
+
+/* Diagram */
+.diagram{margin:44px 0 0;background:var(--surface);border:1px solid var(--line);border-radius:22px;padding:20px 12px;box-shadow:var(--shadow)}
+@media (min-width:720px){.diagram{padding:36px 28px}}
+.diagram svg{display:block;width:100%;height:auto}
+.diagram .dg-tall{display:block;max-width:420px;margin:0 auto}
+.diagram .dg-wide{display:none}
+@media (min-width:760px){.diagram .dg-tall{display:none}.diagram .dg-wide{display:block}}
+.diagram figcaption{margin:18px 8px 0;font-size:14.5px;color:var(--muted);text-align:center}
+svg .bx{fill:var(--sunken);stroke:var(--line-2);stroke-width:1.5}
+svg .vm{fill:var(--surface);stroke:var(--text);stroke-width:3}
+svg .vm-in{fill:var(--sunken);stroke:var(--line);stroke-width:1.2}
+svg .ext{fill:var(--ok-soft);stroke:var(--ok);stroke-width:1.5}
+svg .ext-no{fill:none;stroke:var(--faint);stroke-width:1.5;stroke-dasharray:5 5}
+svg .mdl{fill:var(--cool-soft);stroke:var(--cool);stroke-width:1.5}
+svg .t1{fill:var(--text);font:700 15px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+svg .t2{fill:var(--muted);font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+svg .t3{fill:var(--text);font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace}
+svg .tl{fill:var(--muted);font:600 12.5px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+svg .tok{fill:var(--ok);font:700 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+svg .tno{fill:var(--leak);font:700 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+svg .tvm{fill:var(--text);font:800 16px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+svg .badge{fill:var(--text)}
+svg .badge-t{fill:var(--bg);font:700 11.5px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;letter-spacing:.04em}
+svg .ar{stroke:var(--text);stroke-width:1.6;fill:none}
+svg .ar-ok{stroke:var(--ok);stroke-width:1.8;fill:none}
+svg .ar-no{stroke:var(--leak);stroke-width:1.8;fill:none;stroke-dasharray:4 4}
+svg .x{stroke:var(--leak);stroke-width:2.6;stroke-linecap:round}
+svg .hd{fill:var(--text)}
+svg .hd-ok{fill:var(--ok)}
+
+/* Findings table */
+.tbl{margin-top:44px;background:var(--surface);border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow);overflow:hidden}
+table{width:100%;border-collapse:collapse;font-size:15.5px}
+th{text-align:left;font-size:12.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);padding:16px 20px;background:var(--sunken);border-bottom:1px solid var(--line)}
+td{padding:20px;border-top:1px solid var(--line);vertical-align:top}
+tbody tr:first-child td{border-top:0}
+td .drift{display:flex;align-items:center;gap:12px;font-weight:680;font-size:16px;line-height:1.3}
+td .cnt{font-size:22px;font-weight:780;letter-spacing:-.03em;display:block;line-height:1.2}
+td .sub{display:block;font-size:13.5px;color:var(--muted);margin-top:2px}
+td.m{color:var(--muted)}
+.tbl-foot{padding:16px 20px;font-size:14.5px;color:var(--muted);border-top:1px solid var(--line);background:var(--sunken)}
+.tbl-foot b{color:var(--text)}
+@media (max-width:759px){
+  table,tbody,tr,td{display:block}
+  thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+  tr{padding:18px 18px 8px;border-top:1px solid var(--line)}
+  tbody tr:first-child{border-top:0}
+  td{padding:0 0 12px;border:0}
+  td[data-label]:not(:first-child)::before{content:attr(data-label);display:block;font-size:11.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin-bottom:3px}
+}
+
+/* Sample run (filled after the first live run) */
+.run{margin-top:36px;display:grid;gap:14px}
+.run a{font-weight:650}
+
+/* Built with */
+.stack{margin-top:40px;display:grid;gap:12px;grid-template-columns:1fr}
+@media (min-width:600px){.stack{grid-template-columns:repeat(2,1fr)}}
+@media (min-width:1000px){.stack{grid-template-columns:repeat(5,1fr)}}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:18px;min-width:0}
+.tile b{display:block;font-size:15.5px;letter-spacing:-.01em}
+.tile span{display:block;margin-top:6px;font-size:14px;color:var(--muted);line-height:1.5}
+
+/* Status */
+.real{margin-top:36px;display:grid;gap:12px;grid-template-columns:1fr;list-style:none;padding:0}
+@media (min-width:760px){.real{grid-template-columns:repeat(2,1fr)}}
+.real li{display:flex;gap:12px;align-items:flex-start;padding:16px 18px;border-radius:14px;border:1px solid var(--line);background:var(--surface);font-size:15.5px}
+.real li svg{flex:none;margin-top:3px;color:var(--muted)}
+
+/* Footer */
+.foot{border-top:1px solid var(--line);padding:32px 0 48px;display:flex;flex-wrap:wrap;gap:16px 28px;align-items:center;justify-content:space-between;font-size:14px;color:var(--muted)}
+.foot a{font-weight:600;color:var(--text)}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="#" aria-label="LeakFinder home">
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M12 2.4c-3.7 4.7-6.6 8.4-6.6 11.9a6.6 6.6 0 0 0 13.2 0c0-3.5-2.9-7.2-6.6-11.9Z" fill="currentColor"/><path d="M9 14.5a3 3 0 0 0 3 3" stroke="var(--bg)" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>
+      LeakFinder
+    </a>
+    <nav class="nav" aria-label="Page">
+      <a class="lnk" href="#how">How it works</a>
+      <a class="lnk" href="#room">The sealed room</a>
+      <a class="lnk" href="#finds">What it finds</a>
+      <a class="lnk" href="#stack">Built with</a>
+      <a class="gh" href="https://github.com/rajkaria/leakfinder">
+        <svg class="ico" viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div>
+        <p class="eyebrow"><i></i>Built at the CreateOS × Stripe Projects hackathon</p>
+        <h1 id="hero-title">An AI agent that finds <em>money leaking</em> between Stripe and your database.</h1>
+        <p class="lede">It writes its own code and runs it in a sealed CreateOS sandbox.</p>
+        <p class="for">For a SaaS founder whose Stripe account and database disagree about who is paying.</p>
+        <div class="install">
+          <div class="cmd"><span class="p">$</span><code>npx leakfinder audit</code></div>
+          <span class="tag"><i></i>npm package in preparation</span>
+        </div>
+        <div class="ctas">
+          <a class="btn btn-primary" href="https://github.com/rajkaria/leakfinder">
+            <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+            View the code on GitHub
+          </a>
+          <a class="btn btn-ghost" href="#how">How it works</a>
+        </div>
+        <p class="note">Until the package is on npm, run it from the repo. The README has the steps.</p>
+      </div>
+
+      <figure class="key" aria-label="What the seed plants in the demo dataset">
+        <div class="key-top"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span><b>Demo dataset</b> · answer key</span></div>
+        <div class="key-body">
+          <p class="key-label">Planted by the seed</p>
+          <p class="amt"><b>$348</b><span>/ month leaking</span></p>
+          <p class="key-sub">252 app users. Pro is $29 a month. The agent has never seen this schema and has to find all of it.</p>
+          <ul class="rows">
+            <li><span class="letter tone-leak">A</span><span class="what">Pro access nobody pays for<small>7 never paid, 5 cancelled in Stripe</small></span><span class="n">12</span></li>
+            <li><span class="letter tone-warn">B</span><span class="what">Paying with no account<small>Stripe charges them, the app has no user</small></span><span class="n">3</span></li>
+            <li><span class="letter tone-cool">C</span><span class="what">Rows out of sync<small>The app says active, Stripe says canceled</small></span><span class="n">5</span></li>
+          </ul>
+        </div>
+        <figcaption class="key-foot">12 × $29 = $348 a month. These are the planted numbers, not a run result.</figcaption>
+      </figure>
+    </section>
+
+    <section class="section" id="how" aria-labelledby="how-title">
+      <p class="kicker">How it works</p>
+      <h2 id="how-title">Three things to check</h2>
+      <p class="intro">Give LeakFinder a Postgres and a Stripe key. The agent works out your schema, writes the reconciliation, and writes the fix.</p>
+
+      <div class="beats">
+        <article class="beat">
+          <div>
+            <span class="num">1</span>
+            <h3>It writes and fixes its own code, in a sealed room.</h3>
+            <p>The agent has never seen your schema. It writes Python, runs it in a CreateOS micro-VM and reads what comes back. <b>When a query fails, it reads the error and rewrites the script.</b> Nobody is typing.</p>
+            <p>The VM can reach api.stripe.com and your database host. Everything else is dropped by a rule on the host, outside the VM, so code inside cannot change it.</p>
+          </div>
+          <ul class="allow" aria-label="Outbound network allowlist">
+            <li><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.2 4.2L19 7" stroke="var(--ok)" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><code>api.stripe.com</code><span class="st yes">allowed</span></li>
+            <li><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.2 4.2L19 7" stroke="var(--ok)" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><code>your database host</code><span class="st yes">allowed</span></li>
+            <li class="blocked"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="var(--leak)" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg><span>anything else</span><span class="st no">dropped</span></li>
+          </ul>
+        </article>
+
+        <article class="beat">
+          <div>
+            <span class="num">2</span>
+            <h3>The model never sees a customer.</h3>
+            <p>It gets code, schema, counts and errors. <b>Emails are redacted before any text reaches it,</b> and the findings go to a file inside the VM, not to the model. Every byte the model was shown is saved in a transcript you can grep.</p>
+            <p>Take a customer email from the report and search for it in that transcript. The count is the proof. The guard redacts email addresses; other fields stay out because the agent's scripts are asked to print counts only.</p>
+          </div>
+          <div>
+<pre class="term" aria-label="Transcript check"><span class="c"># an email from the report</span>
+<span class="p">$ </span>grep -c "&lt;email&gt;" transcript.jsonl
+<span class="z">0</span></pre>
+            <p class="cap">The live demo runs this check with the email the seed plants.</p>
+          </div>
+        </article>
+
+        <article class="beat">
+          <div>
+            <span class="num">3</span>
+            <h3>Apply closes the leak, in Stripe test mode.</h3>
+            <p>The agent writes the fix script too. It dry-runs first and prints a plan with counts. <b>A person presses Apply:</b> invoices out, refunds issued, access revoked, rows synced.</p>
+            <p>Then a separate program reads Stripe and Postgres directly, without the agent, and reads zero. Apply runs with a Stripe test key only. Invoices are sent, not collected.</p>
+          </div>
+          <ol class="steps" aria-label="Apply flow">
+            <li><span class="k">Dry run</span><span class="t">A plan with counts</span><span class="d">Nothing changes in Stripe or the database.</span></li>
+            <li><span class="k">Apply</span><span class="t">Invoices, refunds, revokes, syncs</span><span class="d">In Stripe test mode, after a person clicks.</span></li>
+            <li class="zero"><span class="k">Verify</span><span class="t">Zero, zero, zero</span><span class="d"><code>pnpm run verify</code> counts the drift again from Stripe and Postgres.</span></li>
+          </ol>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="room" aria-labelledby="room-title">
+      <p class="kicker">The sealed room</p>
+      <h2 id="room-title">The code runs next to the data. The model stays outside.</h2>
+      <p class="intro">Your laptop runs the LeakFinder CLI. It passes Python into a CreateOS micro-VM and passes back only what the script prints, with emails redacted, to the model.</p>
+
+      <figure class="diagram">
+        <!-- Wide layout, 760 px and up -->
+        <svg class="dg-wide" viewBox="0 0 1080 420" role="img" aria-labelledby="dgw-t dgw-d">
+          <title id="dgw-t">The sealed room</title>
+          <desc id="dgw-d">Claude, outside the VM, exchanges text with your laptop: it receives code, schema, counts and errors, and sends back Python. Your laptop runs the LeakFinder CLI, redacts emails and keeps the transcript. The laptop sends the script into a CreateOS micro-VM and gets counts and errors back. The VM has an egress allowlist: api.stripe.com and the database host are allowed, anything else is dropped. Findings go to a file inside the VM and are never sent to the model.</desc>
+          <defs>
+            <marker id="mw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="hd" d="M0 0L10 5L0 10z"/></marker>
+            <marker id="mwok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="hd-ok" d="M0 0L10 5L0 10z"/></marker>
+          </defs>
+
+          <!-- Claude -->
+          <rect class="mdl" x="10" y="140" width="190" height="130" rx="16"/>
+          <text class="t1" x="105" y="178" text-anchor="middle">Claude</text>
+          <text class="t2" x="105" y="200" text-anchor="middle">the model, outside the VM</text>
+          <text class="t2" x="105" y="230" text-anchor="middle">sees no customer rows</text>
+
+          <!-- Claude <-> laptop -->
+          <text class="tl" x="268" y="168" text-anchor="middle">code, schema,</text>
+          <text class="tl" x="268" y="184" text-anchor="middle">counts, errors</text>
+          <line class="ar" x1="328" y1="196" x2="206" y2="196" marker-end="url(#mw)"/>
+          <line class="ar" x1="206" y1="226" x2="328" y2="226" marker-end="url(#mw)"/>
+          <text class="tl" x="268" y="248" text-anchor="middle">Python</text>
+
+          <!-- Laptop -->
+          <rect class="bx" x="336" y="130" width="200" height="150" rx="16"/>
+          <text class="t1" x="436" y="166" text-anchor="middle">Your laptop</text>
+          <text class="t3" x="436" y="190" text-anchor="middle">LeakFinder CLI</text>
+          <text class="t2" x="436" y="220" text-anchor="middle">redacts emails</text>
+          <text class="t2" x="436" y="240" text-anchor="middle">keeps the transcript</text>
+
+          <!-- Laptop <-> VM -->
+          <text class="tl" x="596" y="184" text-anchor="middle">Python script</text>
+          <line class="ar" x1="542" y1="196" x2="650" y2="196" marker-end="url(#mw)"/>
+          <line class="ar" x1="650" y1="226" x2="542" y2="226" marker-end="url(#mw)"/>
+          <text class="tl" x="596" y="248" text-anchor="middle">counts, errors</text>
+
+          <!-- VM -->
+          <rect class="vm" x="658" y="40" width="250" height="340" rx="20"/>
+          <rect class="badge" x="700" y="28" width="166" height="24" rx="12"/>
+          <text class="badge-t" x="783" y="44.5" text-anchor="middle">EGRESS ALLOWLIST</text>
+          <text class="tvm" x="783" y="92" text-anchor="middle">CreateOS micro-VM</text>
+          <rect class="vm-in" x="682" y="118" width="202" height="86" rx="12"/>
+          <text class="t3" x="783" y="152" text-anchor="middle">the agent's Python</text>
+          <text class="t2" x="783" y="176" text-anchor="middle">runs here</text>
+          <rect class="vm-in" x="682" y="220" width="202" height="86" rx="12"/>
+          <text class="t3" x="783" y="254" text-anchor="middle">findings.json</text>
+          <text class="t2" x="783" y="278" text-anchor="middle">never sent to the model</text>
+          <text class="t2" x="783" y="346" text-anchor="middle">rule enforced on the host</text>
+
+          <!-- VM -> outside -->
+          <line class="ar-ok" x1="910" y1="110" x2="938" y2="110" marker-end="url(#mwok)"/>
+          <rect class="ext" x="944" y="80" width="126" height="60" rx="12"/>
+          <text class="t3" x="1007" y="106" text-anchor="middle">api.stripe.com</text>
+          <text class="tok" x="1007" y="126" text-anchor="middle">allowed</text>
+
+          <line class="ar-ok" x1="910" y1="210" x2="938" y2="210" marker-end="url(#mwok)"/>
+          <rect class="ext" x="944" y="180" width="126" height="60" rx="12"/>
+          <text class="t3" x="1007" y="206" text-anchor="middle">database host</text>
+          <text class="tok" x="1007" y="226" text-anchor="middle">allowed</text>
+
+          <line class="ar-no" x1="910" y1="310" x2="938" y2="310"/>
+          <path class="x" d="M918 302l14 16M932 302l-14 16"/>
+          <rect class="ext-no" x="944" y="280" width="126" height="60" rx="12"/>
+          <text class="t2" x="1007" y="306" text-anchor="middle">anything else</text>
+          <text class="tno" x="1007" y="326" text-anchor="middle">dropped</text>
+        </svg>
+
+        <!-- Tall layout, under 760 px -->
+        <svg class="dg-tall" viewBox="0 0 360 760" role="img" aria-labelledby="dgt-t dgt-d">
+          <title id="dgt-t">The sealed room</title>
+          <desc id="dgt-d">Claude, outside the VM, receives code, schema, counts and errors from your laptop and sends back Python. Your laptop runs the LeakFinder CLI, redacts emails and keeps the transcript. It sends the script into a CreateOS micro-VM and gets counts and errors back. The VM can reach api.stripe.com and the database host; anything else is dropped. Findings go to a file inside the VM and are never sent to the model.</desc>
+          <defs>
+            <marker id="mt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="hd" d="M0 0L10 5L0 10z"/></marker>
+            <marker id="mtok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="hd-ok" d="M0 0L10 5L0 10z"/></marker>
+          </defs>
+
+          <rect class="mdl" x="20" y="8" width="320" height="84" rx="16"/>
+          <text class="t1" x="180" y="40" text-anchor="middle">Claude</text>
+          <text class="t2" x="180" y="62" text-anchor="middle">the model, outside the VM</text>
+          <text class="t2" x="180" y="80" text-anchor="middle">sees no customer rows</text>
+
+          <line class="ar" x1="140" y1="164" x2="140" y2="98" marker-end="url(#mt)"/>
+          <text class="tl" x="128" y="124" text-anchor="end">code, schema,</text>
+          <text class="tl" x="128" y="140" text-anchor="end">counts, errors</text>
+          <line class="ar" x1="220" y1="98" x2="220" y2="164" marker-end="url(#mt)"/>
+          <text class="tl" x="232" y="134" text-anchor="start">Python</text>
+
+          <rect class="bx" x="20" y="170" width="320" height="100" rx="16"/>
+          <text class="t1" x="180" y="202" text-anchor="middle">Your laptop</text>
+          <text class="t3" x="180" y="224" text-anchor="middle">LeakFinder CLI</text>
+          <text class="t2" x="180" y="250" text-anchor="middle">redacts emails · keeps the transcript</text>
+
+          <line class="ar" x1="140" y1="276" x2="140" y2="342" marker-end="url(#mt)"/>
+          <text class="tl" x="128" y="314" text-anchor="end">Python script</text>
+          <line class="ar" x1="220" y1="342" x2="220" y2="276" marker-end="url(#mt)"/>
+          <text class="tl" x="232" y="314" text-anchor="start">counts, errors</text>
+
+          <rect class="vm" x="20" y="356" width="320" height="250" rx="20"/>
+          <rect class="badge" x="97" y="344" width="166" height="24" rx="12"/>
+          <text class="badge-t" x="180" y="360.5" text-anchor="middle">EGRESS ALLOWLIST</text>
+          <text class="tvm" x="180" y="402" text-anchor="middle">CreateOS micro-VM</text>
+          <rect class="vm-in" x="40" y="422" width="280" height="60" rx="12"/>
+          <text class="t3" x="180" y="448" text-anchor="middle">the agent's Python</text>
+          <text class="t2" x="180" y="468" text-anchor="middle">runs here</text>
+          <rect class="vm-in" x="40" y="494" width="280" height="60" rx="12"/>
+          <text class="t3" x="180" y="520" text-anchor="middle">findings.json</text>
+          <text class="t2" x="180" y="540" text-anchor="middle">never sent to the model</text>
+          <text class="t2" x="180" y="584" text-anchor="middle">rule enforced on the host</text>
+
+          <line class="ar-ok" x1="68" y1="608" x2="68" y2="660" marker-end="url(#mtok)"/>
+          <rect class="ext" x="14" y="666" width="108" height="72" rx="12"/>
+          <text class="t3" x="68" y="694" text-anchor="middle">api.stripe</text>
+          <text class="t3" x="68" y="710" text-anchor="middle">.com</text>
+          <text class="tok" x="68" y="728" text-anchor="middle">allowed</text>
+
+          <line class="ar-ok" x1="180" y1="608" x2="180" y2="660" marker-end="url(#mtok)"/>
+          <rect class="ext" x="126" y="666" width="108" height="72" rx="12"/>
+          <text class="t3" x="180" y="694" text-anchor="middle">database</text>
+          <text class="t3" x="180" y="710" text-anchor="middle">host</text>
+          <text class="tok" x="180" y="728" text-anchor="middle">allowed</text>
+
+          <line class="ar-no" x1="292" y1="608" x2="292" y2="660"/>
+          <path class="x" d="M284 626l16 16M300 626l-16 16"/>
+          <rect class="ext-no" x="238" y="666" width="108" height="72" rx="12"/>
+          <text class="t2" x="292" y="698" text-anchor="middle">anything</text>
+          <text class="t2" x="292" y="714" text-anchor="middle">else</text>
+          <text class="tno" x="292" y="730" text-anchor="middle">dropped</text>
+        </svg>
+        <figcaption>The model receives only code, schema, counts and errors. Customer rows never reach it.</figcaption>
+      </figure>
+    </section>
+
+    <section class="section" id="finds" aria-labelledby="finds-title">
+      <p class="kicker">What it finds</p>
+      <h2 id="finds-title">Three ways Stripe and your database drift apart</h2>
+      <p class="intro">A missed webhook is enough. Stripe cancels someone and the app never hears, or someone pays and never gets an account.</p>
+
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr><th scope="col">Drift</th><th scope="col">What is wrong</th><th scope="col">In the demo dataset</th><th scope="col">What Apply does</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-label="Drift"><span class="drift"><span class="letter tone-leak">A</span>Pro access nobody pays for</span></td>
+              <td class="m" data-label="What is wrong">The app grants Pro. Stripe has no active or trialing subscription for that user.</td>
+              <td data-label="In the demo dataset"><span class="cnt">12 users</span><span class="sub">7 never paid, 5 cancelled in Stripe while the app never heard</span></td>
+              <td class="m" data-label="What Apply does">Revokes the access and sends a one-month invoice, due in 7 days.</td>
+            </tr>
+            <tr>
+              <td data-label="Drift"><span class="drift"><span class="letter tone-warn">B</span>Paying with no account</span></td>
+              <td class="m" data-label="What is wrong">Stripe has an active subscription for a customer no app user owns.</td>
+              <td data-label="In the demo dataset"><span class="cnt">3 payers</span><span class="sub">charged every month, with no account to use</span></td>
+              <td class="m" data-label="What Apply does">Refunds the latest payment and cancels the subscription.</td>
+            </tr>
+            <tr>
+              <td data-label="Drift"><span class="drift"><span class="letter tone-cool">C</span>Rows out of sync</span></td>
+              <td class="m" data-label="What is wrong">The app's subscription row says active. Stripe says canceled.</td>
+              <td data-label="In the demo dataset"><span class="cnt">5 rows</span><span class="sub">the same 5 users Stripe cancelled</span></td>
+              <td class="m" data-label="What Apply does">Sets the app row to Stripe's status.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="tbl-foot">Pro is $29 a month in the demo dataset: <b>12 × $29 = $348 a month leaking.</b> These are the seed's answer key. A separate check, <code>pnpm run verify</code>, recounts them from Stripe and Postgres.</p>
+      </div>
+    </section>
+
+    <!-- Sample run slot. After the first live run the orchestrator pastes a real terminal excerpt
+         (escape < > &) and a link to a real report at the marker below, then deletes the
+         "hidden" attribute on this section. Until then the section renders nothing.
+         Shape to paste:
+           <pre class="term">...real terminal lines...</pre>
+           <p><a href="REPORT_URL">Open the report from this run</a></p> -->
+    <section class="section" id="sample-run" aria-labelledby="run-title" hidden>
+      <p class="kicker">A real run</p>
+      <h2 id="run-title">One audit, start to finish</h2>
+      <div class="run">
+<!-- SAMPLE-RUN -->
+      </div>
+    </section>
+
+    <section class="section" id="stack" aria-labelledby="stack-title">
+      <p class="kicker">Built with</p>
+      <h2 id="stack-title">Five pieces, one terminal</h2>
+      <div class="stack">
+        <div class="tile"><b>Stripe Projects</b><span>Sets up the stack from the terminal: CreateOS and Postgres, credentials in .env.</span></div>
+        <div class="tile"><b>CreateOS Sandbox</b><span>The micro-VM where the agent's code runs, with an egress allowlist.</span></div>
+        <div class="tile"><b>Stripe API, test mode</b><span>Reads every subscription. Apply sends invoices, refunds and cancellations.</span></div>
+        <div class="tile"><b>Neon Postgres via Stripe Projects</b><span>The app's database: users, subscriptions, entitlements.</span></div>
+        <div class="tile"><b>Claude</b><span>Writes the Python and rewrites it when a query fails.</span></div>
+      </div>
+    </section>
+
+    <section class="section" id="status" aria-labelledby="status-title">
+      <p class="kicker">Status</p>
+      <h2 id="status-title">What is real today</h2>
+      <ul class="real">
+        <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>A prototype, built in one day at the CreateOS × Stripe Projects hackathon.</span></li>
+        <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>The 252 users and the drift are planted by our seed. There are no customers.</span></li>
+        <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Tested on one schema, the table shapes of a public SaaS starter.</span></li>
+        <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Money moves in Stripe test mode only.</span></li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span class="brand">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 2.4c-3.7 4.7-6.6 8.4-6.6 11.9a6.6 6.6 0 0 0 13.2 0c0-3.5-2.9-7.2-6.6-11.9Z" fill="currentColor"/></svg>
+      LeakFinder
+    </span>
+    <span>Built at the CreateOS × Stripe Projects hackathon, October 2026. Code written with Claude Code.</span>
+    <a href="https://github.com/rajkaria/leakfinder">github.com/rajkaria/leakfinder</a>
+  </footer>
+</div>
+</body>
+</html>
