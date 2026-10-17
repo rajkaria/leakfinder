@@ -316,7 +316,7 @@ td.m{color:var(--muted)}
             <span class="num">2</span>
             <h3>The model never sees a customer.</h3>
             <p>It gets code, schema, counts and errors. <b>Emails are redacted before any text reaches it,</b> and the findings go to a file inside the VM, not to the model. Every byte the model was shown is saved in a transcript you can grep.</p>
-            <p>Take a customer email from the report and search for it in that transcript. The count is the proof. The guard redacts email addresses; other fields stay out because the agent's scripts are asked to print counts only.</p>
+            <p>Take a customer email from the report and search for it in that transcript. The count is the proof. Email addresses are removed before the model sees anything; other fields stay out because the agent's scripts are asked to print counts only.</p>
           </div>
           <div>
 <pre class="term" aria-label="Transcript check"><span class="c"># an email from the report</span>
