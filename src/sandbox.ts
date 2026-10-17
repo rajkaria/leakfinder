@@ -1,18 +1,45 @@
 /**
  * The sealed room. One CreateOS micro-VM whose outbound traffic is limited to
- * api.stripe.com and the Postgres host. The model's code runs here; the model
- * itself never does.
+ * api.stripe.com and the Postgres server. The model's code runs here; the
+ * model itself never does.
+ *
+ * Egress facts this file is built on (CreateOS docs, Sandbox > Egress):
+ * - a non-empty allowlist is deny-by-default, enforced on the host outside the VM;
+ * - a hostname rule only opens TCP 80 and 443, so Postgres on 5432 needs an
+ *   `ip:port` rule: we resolve the DB host and allow each address on its port;
+ * - IP rules apply at once, hostname rules take about 30 s to propagate, so
+ *   the Stripe side of `sealCheck` polls instead of trusting one probe.
  */
-import { createClient, type Sandbox } from "@nodeops-createos/sandbox";
+import { readFileSync } from "node:fs";
+import { promises as dns } from "node:dns";
+import { isIP } from "node:net";
+import {
+  createClient,
+  CreateosSandboxApiError,
+  CreateosSandboxNotFoundError,
+  CreateosSandboxPaymentRequiredError,
+  CreateosSandboxPermissionError,
+  CreateosSandboxRateLimitError,
+  type CreateosSandboxClient,
+  type Sandbox,
+} from "@nodeops-createos/sandbox";
 import { env, databaseHost } from "./env.js";
 
 export const WORKDIR = "/workspace";
-const DNS = "1.1.1.1:53";
-const INSTALL_HOSTS = ["pypi.org", "files.pythonhosted.org"];
+/** In-guest port of vm/server.py. Ingress routes any port as <id>-<port>.<domain>. */
+export const REPORT_PORT = 8080;
+export const FORK_NEEDS_PLAN =
+  "fork needs the Beginner plan (5 concurrent sandboxes): stripe projects add createos/beginner-monthly";
 
-export function sealedEgress(): string[] {
-  return ["api.stripe.com", databaseHost(), DNS];
-}
+const STRIPE_HOST = "api.stripe.com";
+const STRIPE_PROBE = "https://api.stripe.com/v1/charges";
+const BLOCKED_PROBE = "https://example.com";
+const FALLBACK_DNS = "1.1.1.1";
+const INSTALL_HOSTS = ["pypi.org", "files.pythonhosted.org"];
+/** Hostname rules take ~30 s to propagate; leave headroom over that. */
+const SEAL_BUDGET_MS = 40_000;
+const HOME = `${WORKDIR}/.leakfinder`;
+const SERVER_SRC = new URL("../vm/server.py", import.meta.url);
 
 export interface RunResult {
   stdout: string;
@@ -21,66 +48,232 @@ export interface RunResult {
   ms: number;
 }
 
-export class SealedRoom {
-  private constructor(public readonly box: Sandbox) {}
+export interface SealCheck {
+  /** A host outside the allowlist got no HTTP answer. */
+  sealed: boolean;
+  /** One line for the demo, e.g. `example.com → blocked in 3.0s · api.stripe.com → 401`. */
+  detail: string;
+  /** api.stripe.com answered with any HTTP status (401 without a key counts). */
+  stripeReachable: boolean;
+}
 
-  static client() {
-    return createClient({ apiKey: env.createosKey() });
+let lastRules: string[] | null = null;
+
+/**
+ * The allowlist in force on the most recently opened or attached room. Before
+ * any room exists it describes the plan (the DB as host:port), since the DB
+ * addresses are only resolved when a room opens. Prefer `room.egress` for the report.
+ */
+export function sealedEgress(): string[] {
+  if (lastRules) return [...lastRules];
+  const db = dbTarget();
+  return [STRIPE_HOST, `${db.host}:${db.port}`];
+}
+
+function dbTarget(): { host: string; port: number } {
+  return { host: databaseHost(), port: Number(new URL(env.databaseUrl()).port) || 5432 };
+}
+
+const uniq = (xs: string[]) => [...new Set(xs)];
+/** The API may echo a hostname rule back with a port. */
+const isStripeRule = (r: string) => r === STRIPE_HOST || r.startsWith(`${STRIPE_HOST}:`);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Single-quote for bash, so `$` and backticks in values stay literal. */
+const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+async function resolveV4(host: string): Promise<string[]> {
+  if (isIP(host) === 4) return [host];
+  const found: string[] = [];
+  try {
+    found.push(...(await dns.resolve4(host)));
+  } catch {
+    /* fall through to the OS resolver */
+  }
+  try {
+    found.push(...(await dns.lookup(host, { all: true, family: 4 })).map((a) => a.address));
+  } catch {
+    /* unresolvable here; the VM may still resolve it */
+  }
+  return uniq(found).sort();
+}
+
+function buildRules(p: { dbIps: string[]; dbPort: number; dnsIps: string[]; stripeIps?: string[] }): string[] {
+  const stripe = p.stripeIps?.length ? p.stripeIps.map((ip) => `${ip}:443`) : [STRIPE_HOST];
+  return uniq([...stripe, ...p.dbIps.map((ip) => `${ip}:${p.dbPort}`), ...p.dnsIps.map((ip) => `${ip}:53`)]);
+}
+
+/** Resolver addresses, the DB host's IPv4s as the VM sees them, and whether the two libraries import. */
+const PROBE_PY = `
+import json, re, socket, sys
+def ns(p):
+    try:
+        with open(p) as f:
+            return [s for s in re.findall(r"^\\s*nameserver\\s+([0-9.]+)\\s*$", f.read(), re.M) if not s.startswith("127.")]
+    except OSError:
+        return []
+servers = ns("/etc/resolv.conf") or ns("/run/systemd/resolve/resolv.conf")
+try:
+    ips = sorted({a[4][0] for a in socket.getaddrinfo(sys.argv[1], None, socket.AF_INET)})
+except OSError:
+    ips = []
+try:
+    import stripe, psycopg
+    libs = True
+except Exception:
+    libs = False
+print(json.dumps({"resolvers": servers, "db_ips": ips, "libs": libs, "python": sys.version.split()[0]}))
+`;
+
+/** One HTTPS GET from inside the VM. Python, not curl: python3 is the one tool we know is there. */
+const HTTP_PROBE_PY = `
+import sys, time, urllib.request, urllib.error
+url, t = sys.argv[1], float(sys.argv[2])
+t0 = time.time()
+try:
+    code = urllib.request.urlopen(url, timeout=t).status
+except urllib.error.HTTPError as e:
+    code = e.code
+except Exception:
+    code = 0
+print("PROBE %d %.2f" % (code, time.time() - t0))
+`;
+
+interface Probe {
+  /** HTTP status, 0 when no HTTP answer came back. */
+  code: number;
+  secs: number;
+  /** False when the probe itself did not run, so its 0 proves nothing. */
+  ran: boolean;
+}
+
+export class SealedRoom {
+  private static cached: CreateosSandboxClient | null = null;
+  private stripePinned = false;
+
+  private constructor(
+    public readonly box: Sandbox,
+    private rules: string[],
+  ) {
+    lastRules = rules;
+  }
+
+  static client(): CreateosSandboxClient {
+    SealedRoom.cached ??= createClient({ apiKey: env.createosKey() });
+    return SealedRoom.cached;
   }
 
   /**
    * Create the sandbox with the data credentials declared as envs (the API
-   * never returns their values), install the two Python libraries the agent
-   * may use, then tighten egress to the two data hosts only.
+   * never returns their values) and an allowlist in force before the first
+   * command. PyPI is allowed only until the libraries are confirmed present,
+   * then egress is tightened to Stripe, the DB addresses and DNS.
    */
   static async open(opts: { name?: string; ingress?: boolean } = {}): Promise<SealedRoom> {
-    const client = SealedRoom.client();
-    const box = await client.createSandbox({
-      shape: "s-1vcpu-1gb",
-      rootfs: "devbox:1",
-      name: opts.name ?? `leakfinder-${Date.now().toString(36)}`,
-      envs: {
-        STRIPE_SECRET_KEY: env.stripeKey(),
-        DATABASE_URL: env.databaseUrl(),
-      },
-      egress: [...sealedEgress(), ...INSTALL_HOSTS],
-      ingress_enabled: opts.ingress ?? false,
-    });
-    await box.waitUntilRunning();
-    const room = new SealedRoom(box);
-    await room.exec(`mkdir -p ${WORKDIR}`);
-    await room.ensureLibraries();
-    await room.box.setEgress(sealedEgress());
+    const db = dbTarget();
+    const localDbIps = await resolveV4(db.host);
+    const initial = buildRules({ dbIps: localDbIps, dbPort: db.port, dnsIps: [FALLBACK_DNS] });
+    let box: Sandbox;
+    try {
+      box = await SealedRoom.client().createSandbox(
+        {
+          shape: "s-1vcpu-1gb",
+          rootfs: "devbox:1",
+          name: opts.name ?? `leakfinder-${Date.now().toString(36)}`,
+          envs: {
+            STRIPE_SECRET_KEY: env.stripeKey(),
+            DATABASE_URL: env.databaseUrl(),
+          },
+          egress: [...initial, ...INSTALL_HOSTS],
+          ingress_enabled: opts.ingress ?? false,
+        },
+        { timeoutMs: 180_000 },
+      );
+    } catch (e) {
+      throw await explainCreate(e);
+    }
+    const room = new SealedRoom(box, [...initial, ...INSTALL_HOSTS]);
+    try {
+      await room.exec(`mkdir -p ${HOME}`);
+      const probe = await room.probeEnv(db.host);
+      const dbIps = uniq([...localDbIps, ...probe.db_ips]).sort();
+      if (!dbIps.length) throw new Error(`cannot resolve ${db.host} to an IPv4 address; the Postgres rule needs one`);
+      const sealed = buildRules({
+        dbIps,
+        dbPort: db.port,
+        dnsIps: probe.resolvers.length ? probe.resolvers : [FALLBACK_DNS],
+      });
+      if (!probe.libs) {
+        await room.applyRules([...sealed, ...INSTALL_HOSTS]);
+        await room.installLibraries();
+      }
+      await room.applyRules(sealed);
+      return room;
+    } catch (e) {
+      await room.destroy().catch(() => {});
+      throw e;
+    }
+  }
+
+  /** Reconnect to a room from an earlier command; wakes it if it auto-paused. */
+  static async attach(id: string): Promise<SealedRoom> {
+    const box = await SealedRoom.client().getSandbox(id);
+    let resumed = false;
+    if (box.status === "pausing") await box.waitUntilPaused();
+    if (box.status === "paused") {
+      await box.resume();
+      resumed = true;
+    }
+    if (box.status !== "running") await box.waitUntilRunning({ timeoutMs: 180_000 });
+    const { egress } = await box.getEgress();
+    if (!egress.length) throw new Error(`sandbox ${id} has open egress; refusing to treat it as a sealed room`);
+    const room = new SealedRoom(box, egress);
+    room.stripePinned = !egress.some(isStripeRule);
+    if (resumed) await room.waitForStripe();
     return room;
   }
 
-  static async attach(id: string): Promise<SealedRoom> {
-    const box = await SealedRoom.client().getSandbox(id);
-    return new SealedRoom(box);
-  }
-
-  get id() {
+  get id(): string {
     return this.box.id;
   }
 
+  /** The allowlist as the API echoed it back. */
+  get egress(): string[] {
+    return [...this.rules];
+  }
+
+  /**
+   * Run a bash script in the VM. GNU timeout kills it in the guest when the
+   * budget runs out, so a runaway agent script cannot outlive its turn.
+   */
   async exec(shell: string, timeoutMs = 120_000): Promise<RunResult> {
-    const r = await this.box.runCommand("bash", ["-lc", shell], { timeoutMs } as any);
+    const secs = Math.max(1, Math.ceil(timeoutMs / 1000));
+    const r = await this.box.runCommand("timeout", ["-k", "5", String(secs), "bash", "-lc", shell], {
+      timeoutMs: timeoutMs + 15_000,
+    });
+    const stderr = [
+      r.result.stderr ?? "",
+      r.result.error ? `sandbox agent error: ${r.result.error}` : "",
+      r.result.exit_code === 124 ? `timed out after ${secs}s` : "",
+    ].filter(Boolean);
     return {
       stdout: r.result.stdout ?? "",
-      stderr: r.result.stderr ?? (r.result.error ? `agent error: ${r.result.error}` : ""),
+      stderr: stderr.join("\n"),
       exit_code: r.result.exit_code,
       ms: r.exec_ms,
     };
   }
 
+  /** Run a Python file from WORKDIR. extraEnv is set for this process only (e.g. APPLY=1). */
   async runPython(path: string, extraEnv: Record<string, string> = {}, timeoutMs = 180_000): Promise<RunResult> {
-    const exports = Object.entries(extraEnv)
-      .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-      .join(" ");
-    return this.exec(`cd ${WORKDIR} && ${exports} python3 ${path}`, timeoutMs);
+    const assigns = Object.entries(extraEnv).map(([k, v]) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`bad env name: ${k}`);
+      return `${k}=${shq(v)}`;
+    });
+    const prefix = assigns.length ? `env ${assigns.join(" ")} ` : "";
+    return this.exec(`cd ${WORKDIR} && ${prefix}python3 ${shq(path)}`, timeoutMs);
   }
 
-  async upload(path: string, content: string) {
+  async upload(path: string, content: string): Promise<void> {
     await this.box.files.upload(path, content);
   }
 
@@ -88,36 +281,267 @@ export class SealedRoom {
     return new TextDecoder().decode(await this.box.files.download(path));
   }
 
-  /** pip only runs while the install hosts are still allowed. */
-  private async ensureLibraries() {
-    const probe = await this.exec(`python3 -c "import stripe, psycopg; print('ok')"`);
-    if (probe.stdout.includes("ok")) return;
-    const r = await this.exec(`python3 -m pip install -q stripe "psycopg[binary]" 2>&1 | tail -2`, 240_000);
-    if (r.exit_code !== 0) throw new Error(`pip install failed: ${r.stdout}\n${r.stderr}`);
+  /**
+   * Prove both sides of the seal: example.com gets no HTTP answer and
+   * api.stripe.com answers (401 without a key). Polls the Stripe side while
+   * hostname rules propagate. If Stripe never answers, or example.com does,
+   * pins Stripe by IP (IP rules apply at once and do not depend on hostname
+   * matching) and checks again.
+   */
+  async sealCheck(): Promise<SealCheck> {
+    let check = await this.probeSeal(SEAL_BUDGET_MS);
+    if ((check.sealed && check.stripeReachable) || this.stripePinned) return check;
+    if (await this.pinStripe()) {
+      check = await this.probeSeal(15_000);
+      check.detail += " · Stripe pinned by IP";
+    }
+    return check;
   }
 
-  /** Proof the room is sealed: a host outside the allowlist must fail fast. */
-  async sealCheck(): Promise<{ sealed: boolean; detail: string }> {
-    const r = await this.exec(`curl -sS -m 6 -o /dev/null -w '%{http_code}' https://example.com || echo " blocked"`, 20_000);
-    const out = (r.stdout + r.stderr).trim();
-    return { sealed: !/^200/.test(out), detail: out };
-  }
-
+  /**
+   * Snapshot this room and clone it, so a fix can dry-run against the exact
+   * state the audit saw. Fork needs the source paused, and the paused source
+   * still counts against the concurrent cap, so it fails on Free (1 concurrent).
+   * The original is always resumed before this returns or throws.
+   */
   async pauseAndFork(): Promise<SealedRoom> {
-    await this.box.pause();
-    await this.box.waitUntilPaused();
-    const copy = await this.box.fork({ egress: sealedEgress() });
-    await copy.waitUntilRunning();
-    await this.box.resume();
-    await this.box.waitUntilRunning();
-    return new SealedRoom(copy);
+    await this.box.refresh();
+    if (this.box.status === "running") await this.box.pause();
+    await this.box.waitUntilPaused({ timeoutMs: 180_000 });
+    let copy: Sandbox | undefined;
+    try {
+      // No retries: the SDK retries 429 by default, which only delays the inevitable on Free.
+      copy = await this.box.fork({ egress: this.rules, ingress_enabled: false }, { retry: false, timeoutMs: 120_000 });
+      await copy.waitUntilRunning({ timeoutMs: 180_000 });
+    } catch (e) {
+      if (copy) await copy.destroy().catch(() => {});
+      await this.resumeOriginal();
+      if (isCapError(e)) throw new Error(FORK_NEEDS_PLAN);
+      throw e;
+    }
+    await this.resumeOriginal();
+    const fork = new SealedRoom(copy, this.rules);
+    fork.stripePinned = this.stripePinned;
+    lastRules = this.rules;
+    // Resume and fork can land on a fresh host, where hostname rules propagate again.
+    await Promise.all([fork.waitForStripe(), this.waitForStripe()]);
+    return fork;
   }
 
-  async destroy() {
+  /**
+   * Put report.html and vm/server.py in the VM, start the server detached and
+   * return its public URL (without the ?k= token). The server checks the token
+   * itself; ingress only routes.
+   */
+  async serveReport(opts: { html: string; token: string }): Promise<{ url: string }> {
+    if (!/^[A-Za-z0-9_-]{16,}$/.test(opts.token)) throw new Error("serveReport: token must be 16+ base64url chars");
+    await this.ensureIngress();
+    await this.exec(`mkdir -p ${HOME}`);
+    await this.upload(`${WORKDIR}/report.html`, opts.html);
+    await this.upload(`${HOME}/server.py`, readFileSync(SERVER_SRC, "utf8"));
+    await this.upload(`${HOME}/token`, opts.token);
+    // nohup + setsid + redirected stdio is the docs' recipe for a server that outlives the exec.
+    const start = `
+set -u
+chmod 600 ${HOME}/token
+if [ -f ${HOME}/server.pid ]; then
+  old=$(cat ${HOME}/server.pid); kill "$old" 2>/dev/null
+  for i in $(seq 1 30); do kill -0 "$old" 2>/dev/null || break; sleep 0.1; done
+fi
+cd ${WORKDIR}
+LEAKFINDER_TOKEN="$(cat ${HOME}/token)" LEAKFINDER_WORKDIR=${WORKDIR} LEAKFINDER_PORT=${REPORT_PORT} \\
+  nohup setsid python3 ${HOME}/server.py >${HOME}/server.log 2>&1 </dev/null &
+echo $! > ${HOME}/server.pid
+python3 - <<'PY' && exit 0
+import sys, time, urllib.request as u
+tok = open("${HOME}/token").read().strip()
+req = u.Request("http://127.0.0.1:${REPORT_PORT}/status.json", headers={"X-LeakFinder-Token": tok})
+for _ in range(75):
+    try:
+        if u.urlopen(req, timeout=2).status == 200:
+            print("ready")
+            sys.exit(0)
+    except Exception:
+        pass
+    time.sleep(0.2)
+sys.exit(1)
+PY
+echo "report server did not answer on 127.0.0.1:${REPORT_PORT}"; tail -n 20 ${HOME}/server.log; exit 1
+`;
+    const r = await this.exec(start, 45_000);
+    if (r.exit_code !== 0) throw new Error(`report server did not start: ${(r.stdout + r.stderr).trim().slice(-600)}`);
+    return { url: await this.publicUrl(opts.token) };
+  }
+
+  /**
+   * Pause after `seconds` idle (60 to 86400). A paused room's ingress URL
+   * wakes it on the next request, and pause is a full memory snapshot, so the
+   * detached report server comes back with it.
+   */
+  async enableAutoPause(seconds: number): Promise<void> {
+    if (!Number.isInteger(seconds) || seconds < 60 || seconds > 86_400) {
+      throw new Error("auto-pause must be 60 to 86400 seconds");
+    }
+    await this.box.setAutoPause(seconds);
+  }
+
+  async destroy(): Promise<void> {
     try {
       await this.box.destroy();
-    } catch {
-      /* already gone */
+    } catch (e) {
+      if (e instanceof CreateosSandboxNotFoundError) return; // already gone
+      throw e;
     }
   }
+
+  // ---------------------------------------------------------------------------
+
+  private async applyRules(rules: string[]): Promise<void> {
+    const view = await this.box.setEgress(rules);
+    // An empty list means allow-all. Never accept that as the result of sealing.
+    if (!view.egress?.length) throw new Error("egress update came back empty (allow-all); refusing to continue");
+    this.rules = view.egress;
+    lastRules = this.rules;
+  }
+
+  private async probeEnv(dbHost: string): Promise<{ resolvers: string[]; db_ips: string[]; libs: boolean; python: string }> {
+    const r = await this.exec(`python3 -c ${shq(PROBE_PY)} ${shq(dbHost)}`, 60_000);
+    try {
+      const p = JSON.parse(r.stdout.trim().split("\n").pop() ?? "");
+      return {
+        resolvers: Array.isArray(p.resolvers) ? p.resolvers.filter((s: unknown) => isIP(String(s)) === 4) : [],
+        db_ips: Array.isArray(p.db_ips) ? p.db_ips.filter((s: unknown) => isIP(String(s)) === 4) : [],
+        libs: p.libs === true,
+        python: String(p.python ?? ""),
+      };
+    } catch {
+      throw new Error(`environment probe failed (exit ${r.exit_code}): ${(r.stdout + r.stderr).trim().slice(-400)}`);
+    }
+  }
+
+  /** Only runs while PyPI is still on the allowlist. pip retries cover hostname-rule propagation. */
+  private async installLibraries(): Promise<void> {
+    const pip = `python3 -m pip install -q --disable-pip-version-check --retries 8 --timeout 15 stripe "psycopg[binary]"`;
+    const r = await this.exec(`(${pip} || ${pip} --break-system-packages) 2>&1 | tail -n 5; exit \${PIPESTATUS[0]}`, 300_000);
+    const check = await this.exec(`python3 -c "import stripe, psycopg; print('ok')"`, 60_000);
+    if (!check.stdout.includes("ok")) {
+      throw new Error(`pip install of stripe and psycopg failed (exit ${r.exit_code}): ${(r.stdout + r.stderr).trim()}`);
+    }
+  }
+
+  private async httpProbe(url: string, timeoutSecs: number): Promise<Probe> {
+    const r = await this.exec(`python3 -c ${shq(HTTP_PROBE_PY)} ${shq(url)} ${timeoutSecs}`, (timeoutSecs + 10) * 1000);
+    const m = r.stdout.match(/PROBE (\d+) ([\d.]+)/);
+    if (m) return { code: Number(m[1]), secs: Number(m[2]), ran: true };
+    // Killed by the exec timeout (a hung connect) still means no answer came back.
+    return { code: 0, secs: r.ms / 1000, ran: r.exit_code === 124 };
+  }
+
+  private async probeSeal(budgetMs: number): Promise<SealCheck> {
+    const started = Date.now();
+    const outside = await this.httpProbe(BLOCKED_PROBE, 3);
+    const sealed = outside.ran && outside.code === 0;
+    let stripe = await this.httpProbe(STRIPE_PROBE, 4);
+    // Waiting only helps the Stripe side; a host that answered the outside probe is not going to stop.
+    while (sealed && stripe.code === 0 && Date.now() - started < budgetMs) {
+      await sleep(1_500);
+      stripe = await this.httpProbe(STRIPE_PROBE, 4);
+    }
+    const left = !outside.ran
+      ? "example.com → probe did not run"
+      : sealed
+        ? `example.com → blocked in ${outside.secs.toFixed(1)}s`
+        : `example.com → ${outside.code} (NOT sealed)`;
+    const right = stripe.code
+      ? `api.stripe.com → ${stripe.code}`
+      : `api.stripe.com → unreachable after ${Math.round((Date.now() - started) / 1000)}s`;
+    return { sealed, stripeReachable: stripe.code > 0, detail: `${left} · ${right}` };
+  }
+
+  /** Lenient: true once Stripe answers, false when the budget runs out. */
+  private async waitForStripe(budgetMs = SEAL_BUDGET_MS): Promise<boolean> {
+    const deadline = Date.now() + budgetMs;
+    for (;;) {
+      if ((await this.httpProbe(STRIPE_PROBE, 4)).code > 0) return true;
+      if (Date.now() > deadline) return false;
+      await sleep(1_500);
+    }
+  }
+
+  /** Replace the Stripe hostname rule with its current addresses on 443, and make sure DNS is open. */
+  private async pinStripe(): Promise<boolean> {
+    const ips = await resolveV4(STRIPE_HOST);
+    if (!ips.length) return false;
+    const rest = this.rules.filter((r) => !isStripeRule(r));
+    await this.applyRules(uniq([...ips.map((ip) => `${ip}:443`), ...rest, `${FALLBACK_DNS}:53`]));
+    this.stripePinned = true;
+    return true;
+  }
+
+  private async resumeOriginal(): Promise<void> {
+    await this.box.refresh();
+    if (this.box.status === "pausing") await this.box.waitUntilPaused({ timeoutMs: 180_000 });
+    if (this.box.status === "paused" || this.box.status === "error") await this.box.resume();
+    await this.box.waitUntilRunning({ timeoutMs: 180_000 });
+  }
+
+  private async ensureIngress(): Promise<void> {
+    // GET may omit ingress_url_template (docs flag it as wire drift); the PATCH response carries it.
+    if (!this.box.data.ingress_enabled || !this.box.data.ingress_url_template) await this.box.setIngress(true);
+    if (!this.box.data.ingress_url_template) throw new Error("ingress is on but the API returned no URL template");
+  }
+
+  /** Prefer https; fall back to http if the ingress certificate is not there yet. */
+  private async publicUrl(token: string): Promise<string> {
+    const root = (u: string) => u.replace(/\/+$/, "") + "/";
+    const https = root(this.box.previewUrl(REPORT_PORT));
+    const http = root(this.box.previewUrl(REPORT_PORT, { scheme: "http" }));
+    const deadline = Date.now() + 30_000;
+    for (let i = 0; Date.now() < deadline; i++) {
+      if (await answers(https, token)) return https;
+      if (i >= 3 && (await answers(http, token))) return http;
+      await sleep(1_500);
+    }
+    throw new Error(`report server is up inside the VM but ${https} did not answer from here`);
+  }
+}
+
+async function answers(root: string, token: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${root}status.json`, {
+      headers: { "X-LeakFinder-Token": token },
+      signal: AbortSignal.timeout(6_000),
+    });
+    return res.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+/** Plan caps come back as 429 (and 403 for some quotas). */
+function isCapError(e: unknown): boolean {
+  if (e instanceof CreateosSandboxRateLimitError || e instanceof CreateosSandboxPermissionError) return true;
+  return e instanceof CreateosSandboxApiError && /quota|limit|concurrent/i.test(e.message);
+}
+
+/** Turn a failed create into one line that says what to do. */
+async function explainCreate(e: unknown): Promise<Error> {
+  if (e instanceof CreateosSandboxPaymentRequiredError) {
+    return new Error("CreateOS says the account is out of credit (402); top up, then retry");
+  }
+  if (!isCapError(e)) return e instanceof Error ? e : new Error(String(e));
+  let held = "";
+  try {
+    const boxes = await SealedRoom.client().listSandboxes({ limit: 20 });
+    held = boxes
+      .filter((b) => !["destroyed", "destroying", "failed"].includes(b.status))
+      .map((b) => `${b.id} (${b.status})`)
+      .join(", ");
+  } catch {
+    /* listing is only a hint */
+  }
+  return new Error(
+    `CreateOS sandbox cap reached (Free = 1 concurrent; paused sandboxes count).` +
+      (held ? ` Destroy the old room first: ${held}` : ""),
+  );
 }
