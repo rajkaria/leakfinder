@@ -33,9 +33,10 @@ type Keys = (row: any) => string[];
 const keys = (...parts: [string, (r: any) => string][]): Keys => (row) =>
   parts.map(([tag, get]) => [tag, get(row)] as const).filter(([, v]) => v).map(([tag, v]) => `${tag}:${v}`);
 
-const byUser = keys(["user", (r) => uid(r?.user_id)]);
+// Answer keys for team-based schemas also carry the owner's user id; an agent may report either.
+const byUser = keys(["user", (r) => uid(r?.user_id)], ["user", (r) => uid(r?.owner_user_id)]);
 const byPayer = keys(["sub", (r) => id(r?.subscription_id)], ["cus", (r) => id(r?.stripe_customer_id)]);
-const byRow = keys(["sub", (r) => id(r?.subscription_id)], ["user", (r) => uid(r?.user_id)]);
+const byRow = keys(["sub", (r) => id(r?.subscription_id)], ["user", (r) => uid(r?.user_id)], ["user", (r) => uid(r?.owner_user_id)]);
 
 const list = (v: unknown): any[] => (Array.isArray(v) ? v : []);
 

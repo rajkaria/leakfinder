@@ -7,6 +7,8 @@
 -- pnpm seed runs this file, so it starts by dropping these six tables. The seed
 -- refuses to when users holds anyone it did not create.
 drop table if exists entitlements, subscriptions, prices, products, customers, users cascade;
+-- The saas-starter demo shares this database; drop its tables too so the agent sees one schema.
+drop table if exists activity_logs, invitations, team_members, teams cascade;
 
 create table users (
   id uuid primary key,

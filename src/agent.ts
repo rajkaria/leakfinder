@@ -46,7 +46,7 @@ Modes
 - APPLY = os.environ.get("APPLY") == "1". When APPLY is false, change nothing anywhere: no Stripe writes, no database writes. Read what you need, work out what you would do, and count it. When APPLY is true, do it.
 - First thing: if APPLY is true and STRIPE_SECRET_KEY does not start with "sk_test_" or "rk_test_", print one line saying the key is not a test-mode key and exit with code 3 before touching anything.
 
-What to do per finding
+What to do per finding (in this order: pro_without_subscription, then payers_without_account, then stale_subscription_rows, so a revoke is counted before a row sync changes the same record)
 - pro_without_subscription: revoke the paid entitlement in the database (the table you found in the audit; set it to the free plan or delete the row, whichever matches how the app represents no paid access). If cause is "cancelled_unsynced", stop there: they cancelled in Stripe on purpose, so never bill them. Otherwise (they never paid), bill one month so they can pay to keep access. Find the user's Stripe customer through the app's customer mapping; if there is none, create one with stripe.Customer.create(email=<the user's email from the database>, metadata={"leakfinder_user_id": user_id}). Create the invoice first and attach the item to it (pending items are not pulled into new invoices automatically):
     inv = stripe.Invoice.create(customer=cus, collection_method="send_invoice", days_until_due=7, auto_advance=False, metadata={"leakfinder_user_id": user_id}, idempotency_key=...)
     stripe.InvoiceItem.create(customer=cus, invoice=inv.id, amount=monthly_cents, currency="usd", description="Pro plan, one month", idempotency_key=...)

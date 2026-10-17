@@ -38,9 +38,11 @@
     "lf": "tsx src/cli.ts",
     "check": "tsx src/cli.ts doctor",
     "seed": "tsx src/seed.ts",
+    "seed:starter": "tsx src/starters/saas-starter.ts seed",
     "scan": "tsx src/cli.ts audit",
     "apply": "tsx src/cli.ts apply",
     "verify": "tsx src/verify.ts",
+    "verify:starter": "tsx src/starters/saas-starter.ts verify",
     "demo": "tsx src/cli.ts demo",
     "serve": "tsx src/cli.ts serve",
     "report": "tsx src/cli.ts report",
@@ -49,7 +51,9 @@
     "typecheck": "tsc --noEmit",
     "down": "tsx src/cli.ts down",
     "build": "tsc -p tsconfig.build.json",
-    "prepublishOnly": "pnpm build && pnpm test"
+    "prepublishOnly": "pnpm build && pnpm test",
+    "rehearse": "tsx scripts/rehearse-offline.ts",
+    "rehearse:starter": "tsx scripts/rehearse-starter.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.135.0",
