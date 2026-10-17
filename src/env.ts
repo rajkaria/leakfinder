@@ -11,7 +11,7 @@ config({ path: [".env.local", ".env"], quiet: true });
  */
 const ALIASES: Record<string, { names: string[]; suffix?: RegExp }> = {
   CREATEOS_SANDBOX_API_KEY: { names: ["CREATEOS_SANDBOX_API_KEY", "CREATEOS_API_KEY", "CREATEOS_PROJECT_API_KEY"], suffix: /CREATEOS.*_API_KEY$/ },
-  DATABASE_URL: { names: ["DATABASE_URL", "POSTGRES_URL", "NEON_DATABASE_URL", "PGURL"], suffix: /(_DATABASE_URL|_POSTGRES_URL)$/ },
+  DATABASE_URL: { names: ["DATABASE_URL", "NEON_POSTGRES_CONNECTION_STRING", "POSTGRES_URL", "NEON_DATABASE_URL", "PGURL"], suffix: /(_DATABASE_URL|_POSTGRES_URL)$/ },
   STRIPE_SECRET_KEY: { names: ["STRIPE_SECRET_KEY", "STRIPE_API_KEY"] },
   ANTHROPIC_API_KEY: { names: ["ANTHROPIC_API_KEY"] },
 };
