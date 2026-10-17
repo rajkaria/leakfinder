@@ -10,3 +10,5 @@ runs/
 seed/expected.json
 skills/*
 !skills/.gitkeep
+.burn-rate/
+!.env.example
