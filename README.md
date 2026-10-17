@@ -6,13 +6,17 @@ Built in one day for the CreateOS × Stripe Projects hackathon (2026-10-17 PT). 
 
 ## What it does
 
-A SaaS app records who has Pro in its own database and who pays in Stripe. When a webhook is missed or was never verified, the two stop matching. In the demo data the database says 48 users have Pro. Stripe has 39 paying subscriptions, and only 36 of them belong to those users. The gap hides three problems:
+A SaaS app records who has Pro in its own database and who pays in Stripe. When a webhook is missed or was never verified, the two stop matching.
+
+The demo app is Vercel's [Next.js SaaS Starter](https://github.com/nextjs/saas-starter), with its database schema exactly as the starter ships it (commit `6e33e58`, `seed/saas-starter.sql`). LeakFinder plants the drift, never the schema. The app says 48 teams have Pro. Stripe has 39 paying subscriptions, and only 36 of them belong to those teams. The gap hides three problems:
 
 | | What drifted | Demo data |
 |---|---|---|
-| A | Pro access nobody pays for (7 never paid, 5 cancelled in Stripe without the app hearing) | 12 users, $348 a month |
+| A | Pro access nobody pays for (7 never paid, 5 cancelled in Stripe without the app hearing) | 12 teams, $348 a month |
 | B | People paying with no account to log in to | 3 subscriptions |
 | C | App rows that say `active` while Stripe says `canceled` | 5 rows |
+
+A second schema, with users, customers, subscriptions and an `entitlements` table (`seed/schema.sql`), carries the same drift, so the agent has to write different code for each.
 
 LeakFinder reads your schema, writes Python that reconciles it with every Stripe subscription, runs that Python in a CreateOS micro-VM, and shows you the people and the dollars. Then it writes a fix, dry-runs it, and applies it in Stripe test mode when you say so.
 
@@ -20,7 +24,7 @@ LeakFinder reads your schema, writes Python that reconciles it with every Stripe
 
 1. **The agent writes and fixes its own code, in a sealed room.** The sandbox can reach `api.stripe.com` and your database's addresses on its port. Everything else is dropped on the host, outside the VM, so code inside cannot change the rule. When a query fails, the agent reads the error and rewrites the script.
 2. **The model never sees a customer.** It gets code, schema, counts and error text, with email addresses redacted before anything leaves your machine for the model. Every byte it was shown is saved in `runs/<run>/transcript.jsonl`, and the audit greps that file for a planted customer email.
-3. **Apply recovers the money, in Stripe test mode.** Unpaid Pro access is revoked and invoiced, people paying with no account are refunded and cancelled, stale rows are synced. `pnpm verify` then recounts the drift straight from Postgres and Stripe, with no model involved *(verify live: zeros after Apply)*.
+3. **Apply recovers the money, in Stripe test mode.** Unpaid Pro access is revoked, and the accounts that never paid get an invoice to keep it (the ones that cancelled on purpose are never billed). People paying with no account are refunded and cancelled, stale rows are synced. `pnpm verify` then recounts the drift straight from Postgres and Stripe, with no model involved *(verify live: zeros after Apply)*.
 
 ## How it works
 
@@ -41,17 +45,18 @@ stripe projects add neon/postgres
 stripe projects env --pull                     # writes .env
 # then add ANTHROPIC_API_KEY and a Stripe test key (STRIPE_SECRET_KEY=sk_test_...) to .env
 pnpm check            # opens a sealed sandbox, proves the seal, reaches Stripe and Postgres from inside, destroys it
-pnpm seed             # a demo SaaS with planted drift (src/seed.ts says exactly what is planted)
-pnpm verify           # independent count: 12 / 3 / 5 and $348 a month
+pnpm seed:starter     # nextjs/saas-starter's schema with planted drift (src/starters/saas-starter.ts says what)
+pnpm verify:starter   # independent count: 12 / 3 / 5 and $348 a month
 pnpm scan             # the agent writes and runs the reconciliation, then serves the report
 pnpm apply            # dry run; add --yes to repair, in Stripe test mode
-pnpm verify           # the drift, recounted without the agent
+pnpm verify:starter   # the drift, recounted without the agent
+# the second schema: pnpm seed && pnpm scan && pnpm verify
 pnpm down             # destroy the run's sandbox
 ```
 
 Or, in your own project directory with the same `.env`: `npx leakfinder audit`, `npx leakfinder apply --yes` *(verify live: npm publish pending)*.
 
-`pnpm seed` needs a Stripe account in test mode with no other subscriptions, because the audit reads every subscription in the account. It tags every object it creates (`leakfinder_seed`), retires earlier seeded objects first, and never deletes anything it did not create.
+Both seeds need a Stripe account in test mode with no other subscriptions, because the audit reads every subscription in the account. It tags every object it creates (`leakfinder_seed`), retires earlier seeded objects first, and never deletes anything it did not create.
 
 Other commands: `pnpm serve` re-serves the last report from the sandbox, `pnpm report` re-renders it locally, `pnpm demo` runs the audit and prints the report URL, `pnpm spike` smoke-tests the CreateOS calls with one sandbox, `pnpm test` runs the unit tests.
 
@@ -68,8 +73,8 @@ pnpm test        # guard, transcript, loop, report escaping, seed rules, VM serv
 ## What is real and what is not
 
 - **Real:** the agent loop, the CreateOS sandbox and its egress rules, the Stripe test API, the transcript and the grep, the report served from the sandbox *(verify live)*.
-- **Demo data:** every user, subscription and the drift itself is seeded by this repo. The schema follows the table shapes of a public SaaS billing starter (users, customers, products, prices, subscriptions) plus an `entitlements` table.
-- **Not claimed:** real money (test mode only); collected payments (invoices are sent, not paid); other schemas (one schema is tested); that every personal field is caught (email addresses are removed; the prompt keeps other fields out).
+- **Demo data:** every user, team, subscription and the drift itself is seeded by this repo. The main schema is nextjs/saas-starter's, unmodified; the second follows the users/customers/products/prices/subscriptions shape of Vercel's Supabase billing starter, plus an `entitlements` table.
+- **Not claimed:** real money (test mode only); collected payments (invoices are sent, not paid); schemas beyond the two in this repo; that every personal field is caught (email addresses are removed; the prompt keeps other fields out).
 - **Known gaps:** DNS lookups to the VM's resolver are allowed, so a hostile script could leak data through DNS queries. The database credential is the app's own; a read-only role would be safer for the audit. Forking the VM for the dry run needs the CreateOS Beginner plan; on Free the dry run runs in the original VM, which is safe because `APPLY` is off.
 
 ## Layout
@@ -79,7 +84,8 @@ pnpm test        # guard, transcript, loop, report escaping, seed rules, VM serv
 - `src/llm.ts` the guard and the transcript
 - `src/skills.ts` saved working scripts, keyed by schema fingerprint
 - `src/report.ts` the report page; `src/score.ts` planted versus found
-- `src/seed.ts` the demo SaaS and its planted drift; `src/verify.ts` the independent recount
+- `seed/saas-starter.sql` the starter's schema, verbatim; `src/starters/saas-starter.ts` its seed and recount
+- `src/seed.ts` the second schema's seed; `src/verify.ts` its independent recount
 - `vm/server.py` the small server inside the sandbox that serves the report and runs Apply
 - `src/cli.ts` the commands
 
