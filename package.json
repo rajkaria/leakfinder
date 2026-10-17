@@ -5,10 +5,16 @@
   "type": "module",
   "description": "Finds the money leaking between Stripe and your database. The agent writes the queries, runs them in a sealed CreateOS sandbox, and the model never sees a customer row.",
   "scripts": {
+    "doctor": "tsx src/cli.ts doctor",
     "seed": "tsx src/seed.ts",
+    "verify": "tsx src/verify.ts",
     "audit": "tsx src/cli.ts audit",
     "apply": "tsx src/cli.ts apply",
-    "doctor": "tsx src/cli.ts doctor",
+    "serve": "tsx src/cli.ts serve",
+    "report": "tsx src/cli.ts report",
+    "demo": "tsx src/cli.ts demo",
+    "spike": "tsx scripts/spike-sandbox.ts",
+    "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
