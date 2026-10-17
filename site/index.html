@@ -280,7 +280,7 @@ td.m{color:var(--muted)}
         <div class="key-body">
           <p class="key-label">Planted by the seed</p>
           <p class="amt"><b>$348</b><span>/ month leaking</span></p>
-          <p class="key-sub">Vercel's nextjs/saas-starter, its schema unmodified. 252 users, Pro at $29 a month. The agent has never seen this schema and has to find all of it.</p>
+          <p class="key-sub">Vercel's nextjs/saas-starter, its schema unmodified. 252 users, Pro at $29 a month. Nobody tells the agent this schema; it has to find all of it.</p>
           <ul class="rows">
             <li><span class="letter tone-leak">A</span><span class="what">Pro access nobody pays for<small>7 never paid, 5 cancelled in Stripe</small></span><span class="n">12</span></li>
             <li><span class="letter tone-warn">B</span><span class="what">Paying with no account<small>Stripe charges them, the app has no user</small></span><span class="n">3</span></li>
@@ -336,7 +336,7 @@ td.m{color:var(--muted)}
           <ol class="steps" aria-label="Apply flow">
             <li><span class="k">Dry run</span><span class="t">A plan with counts</span><span class="d">Nothing changes in Stripe or the database.</span></li>
             <li><span class="k">Apply</span><span class="t">Invoices, refunds, revokes, syncs</span><span class="d">In Stripe test mode, after a person clicks.</span></li>
-            <li class="zero"><span class="k">Verify</span><span class="t">Zero, zero, zero</span><span class="d"><code>pnpm run verify</code> counts the drift again from Stripe and Postgres.</span></li>
+            <li class="zero"><span class="k">Verify</span><span class="t">Zero, zero, zero</span><span class="d"><code>pnpm verify:starter</code> counts the drift again from Stripe and Postgres.</span></li>
           </ol>
         </article>
       </div>
@@ -492,9 +492,9 @@ td.m{color:var(--muted)}
           <tbody>
             <tr>
               <td data-label="Drift"><span class="drift"><span class="letter tone-leak">A</span>Pro access nobody pays for</span></td>
-              <td class="m" data-label="What is wrong">The app grants Pro. Stripe has no active or trialing subscription for that user.</td>
+              <td class="m" data-label="What is wrong">The app grants Pro. Stripe has no active or trialing subscription for that team.</td>
               <td data-label="In the demo dataset"><span class="cnt">12 teams</span><span class="sub">7 never paid, 5 cancelled in Stripe while the app never heard</span></td>
-              <td class="m" data-label="What Apply does">Revokes the access and sends a one-month invoice, due in 7 days.</td>
+              <td class="m" data-label="What Apply does">Revokes the access. The 7 who never paid get a one-month invoice, due in 7 days; the 5 who cancelled are never billed.</td>
             </tr>
             <tr>
               <td data-label="Drift"><span class="drift"><span class="letter tone-warn">B</span>Paying with no account</span></td>
@@ -504,22 +504,23 @@ td.m{color:var(--muted)}
             </tr>
             <tr>
               <td data-label="Drift"><span class="drift"><span class="letter tone-cool">C</span>Rows out of sync</span></td>
-              <td class="m" data-label="What is wrong">The app's subscription row says active. Stripe says canceled.</td>
-              <td data-label="In the demo dataset"><span class="cnt">5 rows</span><span class="sub">the same 5 users Stripe cancelled</span></td>
+              <td class="m" data-label="What is wrong">The app's row says the subscription is active. Stripe says canceled.</td>
+              <td data-label="In the demo dataset"><span class="cnt">5 rows</span><span class="sub">the same 5 teams Stripe cancelled</span></td>
               <td class="m" data-label="What Apply does">Sets the app row to Stripe's status.</td>
             </tr>
           </tbody>
         </table>
-        <p class="tbl-foot">Pro is $29 a month in the demo dataset: <b>12 × $29 = $348 a month leaking.</b> These are the seed's answer key. A separate check, <code>pnpm run verify</code>, recounts them from Stripe and Postgres.</p>
+        <p class="tbl-foot">Pro is $29 a month in the demo dataset: <b>12 × $29 = $348 a month leaking.</b> These are the seed's answer key. A separate check, <code>pnpm verify:starter</code>, recounts them from Stripe and Postgres.</p>
       </div>
     </section>
 
     <!-- Sample run slot. After the first live run the orchestrator pastes a real terminal excerpt
-         (escape < > &) and a link to a real report at the marker below, then deletes the
-         "hidden" attribute on this section. Until then the section renders nothing.
+         (escape < > &) at the marker below, then deletes the "hidden" attribute on this section.
+         Until then the section renders nothing. No report link: without its ?k= token it answers 403,
+         and the token must not be published. No customer email either.
          Shape to paste:
            <pre class="term">...real terminal lines...</pre>
-           <p><a href="REPORT_URL">Open the report from this run</a></p> -->
+           <p class="cap">...one caption line...</p> -->
     <section class="section" id="sample-run" aria-labelledby="run-title" hidden>
       <p class="kicker">A real run</p>
       <h2 id="run-title">One audit, start to finish</h2>
@@ -535,7 +536,7 @@ td.m{color:var(--muted)}
         <div class="tile"><b>Stripe Projects</b><span>Sets up the stack from the terminal: CreateOS and Postgres, credentials in .env.</span></div>
         <div class="tile"><b>CreateOS Sandbox</b><span>The micro-VM where the agent's code runs, with an egress allowlist.</span></div>
         <div class="tile"><b>Stripe API, test mode</b><span>Reads every subscription. Apply sends invoices, refunds and cancellations.</span></div>
-        <div class="tile"><b>Neon Postgres via Stripe Projects</b><span>The app's database: users, subscriptions, entitlements.</span></div>
+        <div class="tile"><b>Neon Postgres via Stripe Projects</b><span>The app's database: users, teams and the plan each team is on.</span></div>
         <div class="tile"><b>DeepSeek or Claude</b><span>The model writes the Python and rewrites it when a query fails. The demo runs on DeepSeek.</span></div>
       </div>
     </section>
@@ -546,7 +547,7 @@ td.m{color:var(--muted)}
       <ul class="real">
         <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>A prototype, built in one day at the CreateOS × Stripe Projects hackathon.</span></li>
         <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>The schema is nextjs/saas-starter's, unmodified. The 252 users and the drift are planted by our seed. There are no customers.</span></li>
-        <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Tested on one schema, the table shapes of a public SaaS starter.</span></li>
+        <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Built for two schemas in this repo: nextjs/saas-starter's and a users, subscriptions and entitlements one. No others tested.</span></li>
         <li><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 6v5M10 13.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Money moves in Stripe test mode only.</span></li>
       </ul>
     </section>

@@ -106,9 +106,9 @@ function buildRules(p: { dbIps: string[]; dbPort: number; dnsIps: string[]; stri
   return uniq([...stripe, ...p.dbIps.map((ip) => `${ip}:${p.dbPort}`), ...p.dnsIps.map((ip) => `${ip}:53`)]);
 }
 
-/** Resolver addresses, the DB host's IPv4s as the VM sees them, and whether the two libraries import. */
+/** Resolver addresses, the DB host's IPv4s as the VM sees them, whether the two libraries import, and the wheel target. */
 const PROBE_PY = `
-import json, re, socket, sys
+import json, platform, re, socket, sys
 def ns(p):
     try:
         with open(p) as f:
@@ -127,7 +127,7 @@ try:
     libs = hasattr(stripe, "InvoicePayment")
 except Exception:
     libs = False
-print(json.dumps({"resolvers": servers, "db_ips": ips, "libs": libs, "python": sys.version.split()[0]}))
+print(json.dumps({"resolvers": servers, "db_ips": ips, "libs": libs, "python": sys.version.split()[0], "machine": platform.machine()}))
 `;
 
 /** One HTTPS GET from inside the VM. Python, not curl: python3 is the one tool we know is there. */
@@ -224,7 +224,7 @@ export class SealedRoom {
         dbPort: db.port,
         dnsIps: probe.resolvers.length ? probe.resolvers : [FALLBACK_DNS],
       });
-      if (!probe.libs) await room.installLibraries(probe.python);
+      if (!probe.libs) await room.installLibraries(probe.python, probe.machine);
       await room.applyRules(sealed);
       return room;
     } catch (e) {
@@ -246,7 +246,8 @@ export class SealedRoom {
     try {
       const box = await SealedRoom.client().getSandbox(id);
       if (box.status === "destroyed" || box.status === "failed") return false;
-      await box.destroy();
+      // A second destroy on a `destroying` row can be refused; it still holds the slot until it reaches destroyed.
+      if (box.status !== "destroying") await box.destroy();
       await box.waitUntilDestroyed({ timeoutMs: 30_000 }).catch(() => {});
       return true;
     } catch (e) {
@@ -257,19 +258,33 @@ export class SealedRoom {
 
   /** Reconnect to a room from an earlier command; wakes it if it auto-paused. */
   static async attach(id: string): Promise<SealedRoom> {
-    const box = await SealedRoom.client().getSandbox(id);
-    let resumed = false;
-    if (box.status === "pausing") await box.waitUntilPaused();
+    let box: Sandbox;
+    try {
+      box = await SealedRoom.client().getSandbox(id);
+    } catch (e) {
+      if (e instanceof CreateosSandboxNotFoundError) throw new Error(`sandbox ${id} no longer exists: run pnpm scan again`);
+      throw e;
+    }
+    if (["destroying", "destroyed", "failed"].includes(box.status)) {
+      throw new Error(`sandbox ${id} is ${box.status}: run pnpm scan again`);
+    }
+    if (box.status === "pausing") await box.waitUntilPaused({ timeoutMs: 180_000 });
     if (box.status === "paused") {
-      await box.resume();
-      resumed = true;
+      // Opening the report link can wake it between our GET and this POST; that resume is as good as ours.
+      await box.resume().catch(async (e) => {
+        await box.refresh();
+        if (box.status !== "resuming" && box.status !== "running") throw e;
+      });
     }
     if (box.status !== "running") await box.waitUntilRunning({ timeoutMs: 180_000 });
     const { egress } = await box.getEgress();
     if (!egress.length) throw new Error(`sandbox ${id} has open egress; refusing to treat it as a sealed room`);
     const room = new SealedRoom(box, egress);
     room.stripePinned = !egress.some(isStripeRule);
-    if (resumed) await room.waitForStripe();
+    // Always, not only when this call resumed it: auto-pause plus a wake from the report link (or any resume) can land
+    // on a fresh host where the Stripe hostname rule propagates again, and fix.py must not start into that window.
+    // One probe (~1 s) when Stripe already answers.
+    await room.waitForStripe();
     return room;
   }
 
@@ -449,7 +464,7 @@ echo "report server did not answer on 127.0.0.1:${REPORT_PORT}"; tail -n 20 ${HO
     lastRules = this.rules;
   }
 
-  private async probeEnv(dbHost: string): Promise<{ resolvers: string[]; db_ips: string[]; libs: boolean; python: string }> {
+  private async probeEnv(dbHost: string): Promise<{ resolvers: string[]; db_ips: string[]; libs: boolean; python: string; machine: string }> {
     const r = await this.exec(`python3 -c ${shq(PROBE_PY)} ${shq(dbHost)}`, 60_000);
     try {
       const p = JSON.parse(r.stdout.trim().split("\n").pop() ?? "");
@@ -458,6 +473,7 @@ echo "report server did not answer on 127.0.0.1:${REPORT_PORT}"; tail -n 20 ${HO
         db_ips: Array.isArray(p.db_ips) ? p.db_ips.filter((s: unknown) => isIP(String(s)) === 4) : [],
         libs: p.libs === true,
         python: String(p.python ?? ""),
+        machine: String(p.machine ?? ""),
       };
     } catch {
       throw new Error(`environment probe failed (exit ${r.exit_code}): ${(r.stdout + r.stderr).trim().slice(-400)}`);
@@ -469,12 +485,15 @@ echo "report server did not answer on 127.0.0.1:${REPORT_PORT}"; tail -n 20 ${HO
    * machine once (cached in ~/.cache/leakfinder), uploaded as one tarball and
    * installed with --no-index.
    */
-  private async installLibraries(python: string): Promise<void> {
-    const tgz = hostWheels(python);
-    await this.box.files.upload("/tmp/lf-wheels.tgz", new Blob([readFileSync(tgz)]));
+  private async installLibraries(python: string, machine = ""): Promise<void> {
+    const tgz = hostWheels(python, machine);
+    // ~8 MB from a laptop uplink: the SDK's 60 s default is too tight on a slow connection.
+    await this.box.files.upload("/tmp/lf-wheels.tgz", new Blob([readFileSync(tgz)]), { timeoutMs: 180_000 });
     // -U: an old preinstalled stripe satisfies a bare install and would stay.
     const pip = `python3 -m pip install -q -U --disable-pip-version-check --no-index --find-links /tmp/lf-wheels stripe "psycopg[binary]"`;
-    const unpack = `mkdir -p /tmp/lf-wheels && tar xzf /tmp/lf-wheels.tgz -C /tmp/lf-wheels`;
+    // A tarball packed by macOS tar carries AppleDouble `._<name>.whl` twins that GNU tar extracts as files; drop them
+    // so pip's --find-links only ever sees real wheels.
+    const unpack = `mkdir -p /tmp/lf-wheels && tar xzf /tmp/lf-wheels.tgz -C /tmp/lf-wheels && rm -f /tmp/lf-wheels/._*`;
     const r = await this.exec(`${unpack} && (${pip} || ${pip} --break-system-packages) 2>&1 | tail -n 5; exit \${PIPESTATUS[0]}`, 300_000);
     const check = await this.exec(`python3 -c "import stripe, psycopg; stripe.InvoicePayment; print('ok')"`, 60_000);
     if (!check.stdout.includes("ok")) {
@@ -594,40 +613,50 @@ async function explainCreate(e: unknown): Promise<Error> {
   }
   if (!isCapError(e)) return e instanceof Error ? e : new Error(String(e));
   let held = "";
+  let dying = "";
   try {
     const boxes = await SealedRoom.client().listSandboxes({ limit: 20 });
-    held = boxes
-      .filter((b) => !["destroyed", "destroying", "failed"].includes(b.status))
-      .map((b) => `${b.id} (${b.status})`)
-      .join(", ");
+    const ids = (keep: (s: string) => boolean) =>
+      boxes
+        .filter((b) => keep(b.status))
+        .map((b) => `${b.id} (${b.status})`)
+        .join(", ");
+    held = ids((s) => !["destroyed", "destroying", "failed"].includes(s));
+    // A `destroying` row still holds its slot; calling that the daily cap would send you hunting for a quota you still have.
+    dying = ids((s) => s === "destroying");
   } catch {
     /* listing is only a hint */
   }
   return new Error(
     held
       ? `CreateOS sandbox cap reached (Free = 1 concurrent; paused sandboxes count). Destroy the old room first: ${held}`
-      : // Nothing is holding a slot, so it is the other cap: creates per rolling 24 h, destroyed sandboxes included.
-        `CreateOS refused a new sandbox and none is running: likely the daily cap (Free = 10 per rolling 24 h, destroyed ones count). ${e instanceof Error ? e.message : ""}`.trim(),
+      : dying
+        ? `CreateOS sandbox cap reached while the old room is still being destroyed: ${dying}. Wait ~30 s and retry.`
+        : // Nothing is holding a slot, so it is the other cap: creates per rolling 24 h, destroyed sandboxes included.
+          `CreateOS refused a new sandbox and none is running: likely the daily cap (Free = 10 per rolling 24 h, destroyed ones count). ${e instanceof Error ? e.message : ""}`.trim(),
   );
 }
 
 /**
- * A tarball of stripe + psycopg wheels for the VM's CPython (x86_64 glibc
- * Linux), built on this machine with `pip download` and cached per Python
- * version, so a sealed room installs them with no network at all.
+ * A tarball of stripe + psycopg wheels for the VM's CPython and CPU (glibc
+ * Linux, x86_64 unless the VM reports aarch64), built on this machine with
+ * `pip download` and cached per Python version and arch, so a sealed room
+ * installs them with no network at all.
  */
-export function hostWheels(python: string): string {
+export function hostWheels(python: string, machine = ""): string {
   const ver = (python.match(/^(\d+)\.(\d+)/) ?? [])[0] ?? "3.13";
+  const arch = /^(aarch64|arm64)$/i.test(machine) ? "aarch64" : "x86_64";
   const dir = join(homedir(), ".cache", "leakfinder");
-  const out = join(dir, `wheels-cp${ver.replace(".", "")}-x86_64.tgz`);
+  const out = join(dir, `wheels-cp${ver.replace(".", "")}-${arch}.tgz`);
   if (existsSync(out)) return out;
   mkdirSync(dir, { recursive: true });
   const tmp = mkdtempSync(join(tmpdir(), "lf-wheels-"));
-  const platforms = ["manylinux_2_39_x86_64", "manylinux_2_28_x86_64", "manylinux_2_17_x86_64", "manylinux2014_x86_64", "manylinux_2_5_x86_64", "manylinux1_x86_64"];
+  const platforms = ["manylinux_2_39", "manylinux_2_28", "manylinux_2_17", "manylinux2014", ...(arch === "x86_64" ? ["manylinux_2_5", "manylinux1"] : [])].map((p) => `${p}_${arch}`);
   const args = ["-m", "pip", "download", "-q", "--disable-pip-version-check", "-d", tmp, "--python-version", ver, "--implementation", "cp", "--only-binary=:all:", ...platforms.flatMap((p) => ["--platform", p]), "stripe", "psycopg[binary]"];
   const dl = spawnSync("python3", args, { encoding: "utf8", timeout: 180_000 });
   if (dl.status !== 0) throw new Error(`could not download wheels for Python ${ver} on this machine (python3 -m pip download): ${(dl.stderr || dl.stdout || String(dl.error ?? "")).trim().slice(-400)}`);
-  const tar = spawnSync("tar", ["czf", out, "-C", tmp, "."], { encoding: "utf8" });
+  // COPYFILE_DISABLE: macOS tar would otherwise add a `._<wheel>` AppleDouble file per wheel.
+  const tar = spawnSync("tar", ["czf", out, "-C", tmp, "."], { encoding: "utf8", env: { ...process.env, COPYFILE_DISABLE: "1" } });
   if (tar.status !== 0) throw new Error(`could not pack wheels: ${tar.stderr.trim()}`);
   return out;
 }

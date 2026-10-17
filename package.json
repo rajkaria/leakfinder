@@ -27,6 +27,7 @@
     "bin",
     "dist",
     "vm/server.py",
+    "vm/dryrun.py",
     "seed/schema.sql",
     "README.md",
     "LICENSE"

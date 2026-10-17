@@ -70,6 +70,11 @@ export const env = {
     if (!["low", "medium", "high", "xhigh", "max"].includes(v)) throw new Error(`LEAKFINDER_EFFORT must be low, medium, high, xhigh or max, not ${v}`);
     return v as "low" | "medium" | "high" | "xhigh" | "max";
   },
+  /**
+   * DeepSeek's v4 models think before they answer by default. Off unless set to 1: thinking took ~60 s a turn
+   * and could spend the whole reply budget reasoning, leaving no code block. Thinking off answers in ~3 s.
+   */
+  deepseekThinking: () => process.env.LEAKFINDER_DEEPSEEK_THINKING === "1",
   /** Seconds of idle before the run's sandbox pauses itself (its report URL wakes it). 0 turns it off. */
   autoPauseSeconds: () => Number(process.env.LEAKFINDER_AUTOPAUSE ?? 600),
 };

@@ -24,12 +24,12 @@ LeakFinder reads your schema, writes Python that reconciles it with every Stripe
 
 1. **The agent writes and fixes its own code, in a sealed room.** The sandbox can reach `api.stripe.com` and your database's addresses on its port. Everything else is dropped on the host, outside the VM, so code inside cannot change the rule. When a query fails, the agent reads the error and rewrites the script.
 2. **The model never sees a customer.** It gets code, schema, counts and error text, with email addresses redacted before anything leaves your machine for the model. Every byte it was shown is saved in `runs/<run>/transcript.jsonl`, and the audit greps that file for a planted customer email.
-3. **Apply recovers the money, in Stripe test mode.** Unpaid Pro access is revoked, and the accounts that never paid get an invoice to keep it (the ones that cancelled on purpose are never billed). People paying with no account are refunded and cancelled, stale rows are synced. `pnpm verify` then recounts the drift straight from Postgres and Stripe, with no model involved *(verify live: zeros after Apply)*.
+3. **Apply recovers the money, in Stripe test mode.** Unpaid Pro access is revoked, and the accounts that never paid get an invoice to keep it (the ones that cancelled on purpose are never billed). People paying with no account are refunded and cancelled, stale rows are synced. `pnpm verify:starter` then recounts the drift straight from Postgres and Stripe, with no model involved *(verify live: zeros after Apply)*.
 
 ## How it works
 
 1. `stripe projects` provisions the stack from the terminal: CreateOS and a Postgres database, with credentials written to `.env` *(verify live)*.
-2. LeakFinder opens one CreateOS micro-VM with the outbound allowlist set at create time: `api.stripe.com`, the database's IPv4 addresses on its port, and the VM's DNS resolver. Before any model-written code runs, LeakFinder tests the lock from inside: `example.com` and `pypi.org` get no answer and `api.stripe.com` does. The rules are final from the first packet, and the two Python libraries arrive as wheels built on your machine, so the VM never talks to PyPI.
+2. LeakFinder opens one CreateOS micro-VM with the outbound allowlist set at create time: `api.stripe.com`, the database's IPv4 addresses on its port, and the VM's DNS resolver. Before any model-written code runs, LeakFinder tests the lock from inside: `example.com` and `pypi.org` get no answer and `api.stripe.com` does. The allowlist is in force from the first packet. If the VM's image lacks the two Python libraries, they arrive as wheels built on your machine, so the VM never talks to PyPI.
 3. The model writes Python for your schema, the VM runs it, and only the exit code, counts and error text go back, with email addresses removed. A failing script is rewritten, up to eight turns. A working script is saved for that schema, so the next run on it needs no model turns.
 4. Findings are written to a file inside the VM. The report is built from that file.
 5. The model writes a fix script. It runs first with `APPLY` off, which prints a plan and changes nothing (in a fork of the VM with `pnpm apply --fork` on a paid CreateOS plan). The script refuses to act with anything but a Stripe test-mode key, and the CLI and the VM server check that too.
@@ -63,12 +63,12 @@ Other commands: `pnpm serve` re-serves the last report from the sandbox, `pnpm r
 ## Verify it yourself
 
 ```bash
-pnpm verify      # drift computed in TypeScript from Postgres and Stripe, no model
+pnpm verify:starter   # drift computed in TypeScript from Postgres and Stripe, no model (pnpm verify for the second schema)
 grep -c "$(jq -r .grep_target_email seed/expected.json)" "$(jq -r .runDir runs/last.json)/transcript.jsonl"   # expect 0
 pnpm test        # guard, transcript, loop, report escaping, seed rules, VM server
 ```
 
-`seed/expected.json` is the answer key. `pnpm seed` writes it, it is not committed, and the report scores the agent's findings against it.
+`seed/expected.json` is the answer key. `pnpm seed:starter` (or `pnpm seed`) writes it, it is not committed, and the report scores the agent's findings against it.
 
 ## What is real and what is not
 
@@ -92,10 +92,10 @@ pnpm test        # guard, transcript, loop, report escaping, seed rules, VM serv
 ## Built with
 
 - **Stripe Projects:** provisions CreateOS and Postgres from the terminal and writes `.env` *(verify live)*.
-- **CreateOS Sandbox:** the micro-VM where the agent's code runs: egress allowlist, public URL for the report, pause and fork.
+- **CreateOS Sandbox:** the micro-VM where the agent's code runs: egress allowlist, public URL for the report, auto-pause when idle, and fork on a paid plan.
 - **Stripe API, test mode:** reads subscriptions; writes invoices, refunds and cancellations.
-- **The model:** DeepSeek (`deepseek-chat`, the demo's) or Claude (`claude-sonnet-5-5`) writes and repairs the Python. Whichever key is present picks it; override with `LEAKFINDER_PROVIDER` and `LEAKFINDER_MODEL`. Either way it only ever sees code, schema, counts and errors.
-- **TypeScript on Node** for the orchestrator, **Python 3.12** inside the VM.
+- **The model:** DeepSeek (`deepseek-v4-pro`, the demo's) or Claude (`claude-sonnet-5-5`) writes and repairs the Python. Whichever key is present picks it (Claude if both are); override with `LEAKFINDER_PROVIDER` and `LEAKFINDER_MODEL`. Either way it only ever sees code, schema, counts and errors.
+- **TypeScript on Node** for the orchestrator, **Python 3.13** inside the VM.
 
 ## Built with AI assistance
 

@@ -85,13 +85,18 @@ def tail(stdout, stderr):
     return lines[-LOG_LINES:]
 
 
+DRYRUN = "leakfinder_dryrun.py"  # vm/dryrun.py: APPLY=0 with Stripe writes refused and Postgres read-only
+
+
 def run_fix(apply):
+    if not apply and not os.path.isfile(path(DRYRUN)):
+        return 1, "", "the dry-run guard %s is missing; refusing to run fix.py without it" % DRYRUN
     env = dict(os.environ)
     env["APPLY"] = "1" if apply else "0"
     env.pop("LEAKFINDER_TOKEN", None)  # fix.py has no business with the report token
     try:
         p = subprocess.run(
-            [sys.executable, "fix.py"],
+            [sys.executable, "fix.py"] if apply else [sys.executable, DRYRUN, "fix.py"],
             cwd=WORKDIR,
             env=env,
             capture_output=True,

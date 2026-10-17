@@ -291,22 +291,22 @@ async function audit(demo: boolean) {
   finale(
     demo
       ? [bold(red(`${money(f.monthly_leak_cents)} / month leaking`)), headline(f), "", `${dim("open the report")}`, where, "", dim(fixError ? "next: pnpm scan" : "next: pnpm apply --yes")]
-      : [`${dim("report")}  ${where}`, dim(fixError ? "next: pnpm scan" : "next: pnpm apply   (dry run in a fork)   ·   pnpm apply --yes")],
+      : [`${dim("report")}  ${where}`, dim(fixError ? "next: pnpm scan" : "next: pnpm apply   (dry run, changes nothing)   ·   pnpm apply --yes")],
     demo,
   );
 }
 
 async function apply() {
   const yes = flag("--yes");
-  title("apply", yes ? "dry run in a fork, then fix in Stripe test mode" : "dry run in a fork; nothing changes");
+  title("apply", yes ? "dry run, then fix in Stripe test mode" : "dry run; nothing changes");
   const last = readLast();
   const { SealedRoom, WORKDIR } = await import("./sandbox.js");
-  const { FIX_PATH, assertTestKey } = await import("./agent.js");
+  const { FIX_PATH, assertTestKey, runDryRun } = await import("./agent.js");
   const { guard } = await import("./llm.js");
 
   /** Run fix.py, show its guarded output, return its summary. Throws on a non-zero exit. */
   async function runFix(room: Room, mode: "0" | "1"): Promise<FixSummary | null> {
-    const r = await room.runPython(FIX_PATH, { APPLY: mode });
+    const r = mode === "0" ? await runDryRun(room) : await room.runPython(FIX_PATH, { APPLY: mode });
     block(guard(r.exit_code === 0 ? r.stdout : `${r.stdout}\n${r.stderr}`).text);
     log(`fix.py APPLY=${mode} · exit ${r.exit_code} in ${(r.ms / 1000).toFixed(1)}s`);
     if (r.exit_code !== 0) throw new Error(`fix.py exited ${r.exit_code}`);
@@ -315,7 +315,7 @@ async function apply() {
     return s;
   }
 
-  step("Dry run in a fork of the sealed sandbox");
+  step(flag("--fork") ? "Dry run in a fork of the sealed sandbox" : "Dry run in the sealed sandbox");
   log(`attaching to ${last.sandboxId}`);
   const room = await SealedRoom.attach(last.sandboxId);
 
@@ -375,11 +375,15 @@ async function apply() {
     const s = await runFix(room, "1");
     if (s?.mode !== "applied") throw new Error("fix.py exited 0 but did not report mode \"applied\"; nothing recorded");
     applied = { summary: s, at: new Date().toISOString() };
-    // The in-VM server reads this, so the page's Apply button cannot run fix.py a second time.
-    await room.upload(`${WORKDIR}/applied.json`, JSON.stringify({ applied: true, ...applied, log: [] }));
+    // The in-VM server reads this, so the page's Apply button cannot run fix.py a second time. Stripe already has the
+    // changes, so a failed upload must not stop the local record and the report from saying so.
+    await room.upload(`${WORKDIR}/applied.json`, JSON.stringify({ applied: true, ...applied, log: [] })).catch((e) =>
+      log(yellow(`applied.json not written in the sandbox (${msg(e)}); the page's Apply button stays live`)),
+    );
   }
 
   step("Report, with the result");
+  let url = last.url;
   try {
     const { f, rec } = loadRun(last.runDir);
     rec.summary = applied.summary;
@@ -387,19 +391,20 @@ async function apply() {
     saveRecord(last.runDir, rec);
     log(`local copy: ${writeReport(last.runDir, f, rec.meta, reportOpts(rec, false))}`);
     if (last.url) {
-      const { url } = await room.serveReport({ html: renderReport(f, rec.meta, reportOpts(rec, true)), token: last.token });
+      // serveReport can settle on the http URL when the https one does not answer; link the one that did.
+      url = (await room.serveReport({ html: renderReport(f, rec.meta, reportOpts(rec, true)), token: last.token })).url;
       writeLast({ ...last, url });
       log("re-served from the sandbox");
     }
   } catch (e) {
-    log(yellow(`report not updated: ${msg(e)}`));
+    log(yellow(`report not updated: ${msg(e)}${last.url ? " (pnpm serve retries)" : ""}`));
   }
 
   const s = applied.summary;
   finale([
     bold(green(`Invoiced ${money(s.invoiced_cents)} · Refunded ${money(s.refunded_cents)} · ${money(s.leak_closed_cents)}/month leak closed`)),
     dim(`${plural(s.revoked, "entitlement")} revoked · ${plural(s.rows_synced, "row")} synced · ${plural(s.cancelled, "subscription")} cancelled`),
-    ...(last.url ? ["", `${dim("report")}  ${bold(cyan(link(withToken(last.url, last.token))))}`] : []),
+    ...(url ? ["", `${dim("report")}  ${bold(cyan(link(withToken(url, last.token))))}`] : []),
   ]);
 }
 

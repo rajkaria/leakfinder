@@ -457,13 +457,13 @@ function recoverPanel(opts: ReportOpts) {
       : applied
         ? `<p class="recover-msg">Applied from the terminal with <code>pnpm apply --yes</code>.</p>`
         : `<div class="cmds">
-<div class="cmd"><code>pnpm apply</code><span>dry run in a fork of the sandbox</span></div>
+<div class="cmd"><code>pnpm apply</code><span>dry run in the sandbox, changes nothing</span></div>
 <div class="cmd"><code>pnpm apply --yes</code><span>apply in Stripe test mode</span></div>
 </div>`;
   return `<section class="panel recover" id="recover" data-live="${live ? "1" : "0"}" data-applied="${applied ? "1" : "0"}" aria-labelledby="recover-h">
 <div class="recover-copy">
 <div class="panel-head"><h2 id="recover-h">Recover it</h2><span class="testmode">Stripe test mode</span></div>
-<p>The agent wrote <code>fix.py</code> for this schema. It invoices the users who had Pro for free, refunds the payers who have no account, revokes the access nobody pays for and syncs the stale rows.</p>
+<p>The agent wrote <code>fix.py</code> for this schema. It revokes the access nobody pays for, invoices the accounts that never paid (never the ones that cancelled), refunds and cancels the payers who have no account, and syncs the stale rows.</p>
 <p>A dry run plans every change and touches nothing. Apply runs the same script against Stripe in test mode.</p>
 ${controls}
 </div>

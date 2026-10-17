@@ -17,7 +17,8 @@ import type Anthropic from "@anthropic-ai/sdk";
 const agent = await import("../src/agent.js");
 const { Coder, Transcript } = await import("../src/llm.js");
 const { SkillStore, fingerprint, PROBE_PY } = await import("../src/skills.js");
-const { FINDINGS_PATH, FIX_PATH, DONE, runAudit, writeFix, assertTestKey, errorLine, checkFindings } = agent;
+const { normalizeFindings } = await import("../src/types.js");
+const { FINDINGS_PATH, FIX_PATH, DRYRUN_PATH, DONE, runAudit, writeFix, assertTestKey, errorLine, checkFindings, reconcileProblem } = agent;
 
 const CANARY = "priya.kapoor32@leakfinder.test";
 const tmp = (p: string) => mkdtempSync(join(tmpdir(), `leakfinder-${p}-`));
@@ -39,7 +40,7 @@ const FINDINGS = {
   payers_without_account: [{ stripe_customer_id: "cus_1", subscription_id: "sub_1", monthly_cents: 2900 }],
   stale_subscription_rows: [{ user_id: "u1", subscription_id: "sub_9", app_status: "active", stripe_status: "canceled" }],
   monthly_leak_cents: 5800,
-  totals: { app_users: 252, app_pro_entitlements: 44, stripe_active_subscriptions: 35 },
+  totals: { app_users: 252, app_pro_entitlements: 44, stripe_active_subscriptions: 43 },
 };
 
 const SUMMARY = `LEAKFINDER_SUMMARY {"mode": "dry_run", "revoked": 2, "invoices": 2, "invoiced_cents": 5800, "refunds": 1, "refunded_cents": 2900, "cancelled": 1, "rows_synced": 1, "leak_closed_cents": 5800}`;
@@ -71,6 +72,11 @@ class FakeRoom {
     return { stdout: "", stderr: "", exit_code: 0, ms: 5 };
   }
   async runPython(path: string, env: Record<string, string> = {}) {
+    // The dry-run harness runs fix.py in-process; record and dispatch it as fix.py.
+    if (path === DRYRUN_PATH) {
+      assert.match(this.files.get(DRYRUN_PATH) ?? "", /DryRunWriteRefused/, "the harness is uploaded before every dry run");
+      path = FIX_PATH;
+    }
     this.runs.push({ path, env });
     const code = this.files.get(path) ?? "";
     const ok = (stdout: string) => ({ stdout, stderr: "", exit_code: 0, ms: 1200 });
@@ -84,6 +90,12 @@ class FakeRoom {
         ms: 800,
       };
     if (code.includes("# DONE_NO_FILE")) return ok(`A=2\n${DONE}`);
+    if (code.includes("# PER_MEMBER")) {
+      // One entry per team member, unpriced: valid JSON, wrong on any schema.
+      const a = [...FINDINGS.pro_without_subscription, { ...FINDINGS.pro_without_subscription[0], monthly_cents: 0 }];
+      this.files.set(FINDINGS_PATH, JSON.stringify({ ...FINDINGS, pro_without_subscription: a }));
+      return ok(`A=3 B=1 C=1 (sample ${CANARY})\n${DONE}`);
+    }
     if (code.includes("# AUDIT")) {
       this.files.set(FINDINGS_PATH, JSON.stringify(FINDINGS));
       return ok(`A=2 B=1 C=1 leak=5800 (sample ${CANARY})\n${DONE}`);
@@ -99,7 +111,7 @@ class FakeRoom {
 const say = (sentence: string, marker: string) => `${sentence}\n\`\`\`python\n# ${marker}\nimport os\nprint("hi")\n\`\`\``;
 /** A fix draft that mentions every rule the static check looks for. */
 const sayFix = (sentence: string, marker: string) =>
-  `${sentence}\n\`\`\`python\n# ${marker}\nimport os\nAPPLY = os.environ.get("APPLY") == "1"\nassert os.environ["STRIPE_SECRET_KEY"].startswith(("sk_test_", "rk_test_")) or not APPLY\nkw = dict(idempotency_key="leakfinder-x")\nprint("LEAKFINDER_SUMMARY {}")\n\`\`\``;
+  `${sentence}\n\`\`\`python\n# ${marker}\nimport os\nAPPLY = os.environ.get("APPLY") == "1"\nassert os.environ["STRIPE_SECRET_KEY"].startswith(("sk_test_", "rk_test_")) or not APPLY\nimport hashlib\nRUN = hashlib.sha256(b"findings").hexdigest()[:12]\nkw = dict(idempotency_key=f"leakfinder-{RUN}-x")\nprint("LEAKFINDER_SUMMARY {}")\n\`\`\``;
 
 /** A real Coder (so the real transcript path runs) over a scripted model. */
 function scripted(replies: string[]) {
@@ -298,4 +310,43 @@ test("the probe is valid Python that selects names only", () => {
   assert.match(PROBE_PY, /information_schema\.columns/);
   assert.match(PROBE_PY, /'pg\\\\_%'/, "the LIKE pattern escapes the underscore");
   assert.ok(!/count\(|select \*/i.test(PROBE_PY), "no rows, no counts");
+});
+
+test("reconcileProblem: counts only; flags unpriced, repeated and unbalanced findings", () => {
+  assert.equal(reconcileProblem(normalizeFindings(FINDINGS)), null, "the fixture balances: 44 - 2 = 43 - 1");
+  const a = FINDINGS.pro_without_subscription;
+  const bad = normalizeFindings({ ...FINDINGS, pro_without_subscription: [...a, { ...a[0], monthly_cents: 0 }] });
+  const why = reconcileProblem(bad)!;
+  assert.match(why, /1 of the 3 pro_without_subscription entries have monthly_cents 0/);
+  assert.match(why, /repeats 1 user_id value;/);
+  assert.match(why, /app_pro_entitlements 44 - pro_without_subscription 3 = 41, but stripe_active_subscriptions 43 - payers_without_account 1 = 42/);
+  assert.ok(!why.includes(CANARY) && !why.includes("u1") && !why.includes("cus_1"), "no value from the findings, only counts");
+  assert.equal(reconcileProblem(normalizeFindings({ ...FINDINGS, totals: { app_users: 0, app_pro_entitlements: 0, stripe_active_subscriptions: 0 } })), null, "no totals, no balance check");
+});
+
+test("loop: findings that do not reconcile get one rewrite with counts only, then the agent's answer stands", async () => {
+  const room = new FakeRoom();
+  const model = scripted([say("Audit per member.", "PER_MEMBER"), say("Audit per team.", "AUDIT")]);
+  const lines: string[] = [];
+  const out = await runAudit(tmp("run"), (l) => lines.push(l), {}, { openRoom: async () => room as any, coder: model.make, skills: new SkillStore(tmp("skills")) });
+  assert.equal(out.turns, 2);
+  assert.equal(out.rewrites, 1);
+  assert.equal(out.findings.pro_without_subscription.length, 2);
+  assert.ok(lines.includes(`turn 1: exit 0 · 1.2s · ${DONE} · counts do not reconcile → agent rewriting`), lines.join("\n"));
+  const told = JSON.stringify(model.seen.at(-1)!.messages.at(-1));
+  assert.match(told, /the books do not balance/);
+  assert.ok(!told.includes(CANARY));
+
+  // Raised once only: a second unbalanced pass is accepted (real data can have two subscriptions per customer).
+  const again = scripted([say("Audit per member.", "PER_MEMBER"), say("Same script: the counts are right here.", "PER_MEMBER")]);
+  const out2 = await runAudit(tmp("run"), () => {}, {}, { openRoom: async () => new FakeRoom() as any, coder: again.make, skills: new SkillStore(tmp("skills")) });
+  assert.equal(out2.turns, 2);
+  assert.equal(out2.findings.pro_without_subscription.length, 3);
+});
+
+test("fixRuleGaps: idempotency keys must carry the findings hash, so a re-seed cannot replay an old key", () => {
+  const { fixRuleGaps } = agent;
+  const ok = `APPLY = os.environ.get("APPLY") == "1"\n# sk_test_ rk_test_\nRUN = hashlib.sha256(open(p, "rb").read()).hexdigest()[:12]\nstripe.Invoice.create(idempotency_key=f"leakfinder-{RUN}-invoice-{u}")\nprint("LEAKFINDER_SUMMARY {}")`;
+  assert.equal(fixRuleGaps(ok), null);
+  assert.match(fixRuleGaps(ok.replace(/RUN = .*\n/, "").replace("{RUN}-", ""))!, /do not include the hash of the findings file/);
 });

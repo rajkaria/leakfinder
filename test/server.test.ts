@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SERVER = fileURLToPath(new URL("../vm/server.py", import.meta.url));
+const DRYRUN = fileURLToPath(new URL("../vm/dryrun.py", import.meta.url));
 const TOKEN = "test-token-abc123";
 const EMAIL = "jane.doe@example.com";
 
@@ -37,6 +38,7 @@ async function startServer(extraEnv: Record<string, string> = {}): Promise<Runni
   const dir = mkdtempSync(join(tmpdir(), "leakfinder-server-"));
   writeFileSync(join(dir, "report.html"), "<h1>$348 / month leaking</h1>");
   writeFileSync(join(dir, "fix.py"), FAKE_FIX);
+  if (!extraEnv.NO_DRYRUN_GUARD) writeFileSync(join(dir, "leakfinder_dryrun.py"), readFileSync(DRYRUN, "utf8"));
   const env: Record<string, string> = { ...(process.env as Record<string, string>) };
   delete env.STRIPE_SECRET_KEY;
   Object.assign(env, {
@@ -161,5 +163,19 @@ test("POST /apply refuses a live Stripe key without running fix.py", async () =>
     assert.equal(runs(live), "");
   } finally {
     stop(live);
+  }
+});
+
+test("POST /dryrun refuses to run fix.py when the dry-run guard is missing", async () => {
+  const bare = await startServer({ NO_DRYRUN_GUARD: "1" });
+  try {
+    const login = await fetch(`${bare.base}/?k=${TOKEN}`, { redirect: "manual" });
+    const c = (login.headers.get("set-cookie") ?? "").split(";")[0];
+    const res = await fetch(`${bare.base}/dryrun`, { method: "POST", headers: { cookie: c } });
+    assert.equal(res.status, 500);
+    assert.match(JSON.stringify(await res.json()), /dry-run guard leakfinder_dryrun.py is missing/);
+    assert.equal(runs(bare), "", "fix.py never ran");
+  } finally {
+    bare.proc.kill();
   }
 });

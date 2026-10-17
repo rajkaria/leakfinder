@@ -118,6 +118,8 @@ export const deepseekCreate: CreateMessage = async (params) => {
     max_tokens: Math.min(params.max_tokens, 8_192),
     temperature: 0,
     stream: false,
+    // Reasoning tokens count against max_tokens and never reach `content`; see env.deepseekThinking.
+    thinking: { type: env.deepseekThinking() ? "enabled" : "disabled" },
   };
   let last: unknown = null;
   for (let attempt = 0; attempt <= CLIENT_OPTIONS.maxRetries; attempt++) {

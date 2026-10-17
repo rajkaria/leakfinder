@@ -193,6 +193,8 @@ test("deepseekCreate maps an Anthropic-shaped request to chat completions and ba
     assert.equal(sent.messages[0].content, "SYS");
     assert.equal(sent.messages[1].content, "hi");
     assert.equal(sent.max_tokens, 8_192);
+    // Thinking off by default: reasoning tokens would eat max_tokens and leave no code block.
+    assert.deepEqual(sent.thinking, { type: "disabled" });
     assert.equal(res.content[0].text.includes("print(1)"), true);
     assert.equal(res.stop_reason, "end_turn");
     assert.deepEqual([res.usage.input_tokens, res.usage.cache_read_input_tokens, res.usage.output_tokens], [20, 100, 9]);

@@ -4,7 +4,7 @@
  * shown only code, schema names, counts and error text; findings stay in a
  * file inside the room.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Coder, type CoderLike, Transcript, guard, intentLine, pythonBlock } from "./llm.js";
 import { SealedRoom, WORKDIR, type RunResult, type SealCheck } from "./sandbox.js";
@@ -14,6 +14,9 @@ import { env } from "./env.js";
 
 export const FINDINGS_PATH = `${WORKDIR}/findings.json`;
 export const FIX_PATH = `${WORKDIR}/fix.py`;
+/** vm/dryrun.py, next to fix.py: runs it with APPLY=0 so that no Stripe write or database write can happen. */
+export const DRYRUN_PATH = `${WORKDIR}/leakfinder_dryrun.py`;
+const DRYRUN_SRC = new URL("../vm/dryrun.py", import.meta.url);
 export const DONE = "LEAKFINDER_DONE";
 export const MAX_TURNS = 8;
 const FIX_TURNS = 4;
@@ -35,6 +38,11 @@ Rules that are enforced on you:
 - When the file is written and the counts printed, print the line ${DONE} as the last line. Only do that from a script that runs the whole audit from scratch on its own: that final script is saved and re-run as-is on the next audit of this schema.
 - Stripe: set stripe.api_key = os.environ["STRIPE_SECRET_KEY"]. Read every subscription with stripe.Subscription.list(status="all", limit=100).auto_paging_iter(); sub.customer is the customer id. Only status active and trialing count as paying. On the current API, current_period_end lives on subscription items (sub["items"].data[0].current_period_end), not on the subscription; read price amounts from sub["items"].data[i].price.unit_amount times quantity, per month. A pro user with no Stripe subscription is still worth the plan's monthly price: take it from the app's own price data, or, if the app stores none, from the active Stripe price of that plan (stripe.Price.list(active=True)).
 - A "pro entitlement" is whatever the app uses to grant paid access; discover it from the schema first. Never write to the database or to Stripe during the audit.
+- What each list holds:
+  pro_without_subscription: every paid entitlement the app grants (a paid plan with a status the app treats as paying) that has no active or trialing Stripe subscription behind it. cause "never_paid": the app links no Stripe subscription, or one Stripe does not have; "cancelled_unsynced": the linked subscription is canceled in Stripe while the app still grants access. If the app bills per team, account or organization, list one entry per paying entity, never one per member: user_id is that entity's id and email its owner's. monthly_cents is the plan's monthly price and never 0: match the app's stored product or price id, or its plan name against the Stripe Product name (stripe.Price.list(active=True, expand=["data.product"])).
+  payers_without_account: active or trialing Stripe subscriptions whose customer no app row links to.
+  stale_subscription_rows: app rows whose stored subscription status differs from the status Stripe reports for the same subscription id (for example the app says active, Stripe says canceled). A row can be here and in pro_without_subscription at once.
+- The books must balance: totals.app_pro_entitlements minus len(pro_without_subscription) equals totals.stripe_active_subscriptions minus len(payers_without_account) whenever each paying entity has one subscription. Count both sides the same way (per entity) and print both.
 
 Work in stages: (1) print the schema (tables, columns, types), a row count per table, stripe.VERSION and stripe.api_version, and the Stripe subscription counts by status; (2) write the audit that produces the findings file; if you get an error, fix it and send the corrected full script.`;
 
@@ -43,11 +51,11 @@ const FIX_SYSTEM_SUFFIX = `
 Now you write the fix script. It is saved as ${FIX_PATH} and runs in the same sealed room, from ${WORKDIR}, with the same env vars. It reads ${FINDINGS_PATH} (the file your audit wrote) and repairs each finding. LeakFinder checks the rules below and rejects a script that breaks them.
 
 Modes
-- APPLY = os.environ.get("APPLY") == "1". When APPLY is false, change nothing anywhere: no Stripe writes, no database writes. Read what you need, work out what you would do, and count it. When APPLY is true, do it.
+- APPLY = os.environ.get("APPLY") == "1". When APPLY is false, change nothing anywhere: no Stripe writes, no database writes. Every read (Stripe list and retrieve calls, database SELECTs) runs in both modes; gate only the writes themselves on APPLY, so the dry run counts exactly what APPLY would do. LeakFinder runs the dry run with every Stripe request other than GET refused and the database session read-only, so an ungated write fails the script. When APPLY is true, do it.
 - First thing: if APPLY is true and STRIPE_SECRET_KEY does not start with "sk_test_" or "rk_test_", print one line saying the key is not a test-mode key and exit with code 3 before touching anything.
 
 What to do per finding (in this order: pro_without_subscription, then payers_without_account, then stale_subscription_rows, so a revoke is counted before a row sync changes the same record)
-- pro_without_subscription: revoke the paid entitlement in the database (the table you found in the audit; set it to the free plan or delete the row, whichever matches how the app represents no paid access). If cause is "cancelled_unsynced", stop there: they cancelled in Stripe on purpose, so never bill them. Otherwise (they never paid), bill one month so they can pay to keep access. Find the user's Stripe customer through the app's customer mapping; if there is none, create one with stripe.Customer.create(email=<the user's email from the database>, metadata={"leakfinder_user_id": user_id}). Create the invoice first and attach the item to it (pending items are not pulled into new invoices automatically):
+- pro_without_subscription: revoke the paid entitlement in the database (the table you found in the audit; set it to the free plan or delete the row, whichever matches how the app represents no paid access). Change only what grants the access, such as the plan; leave subscription id and status columns to the stale_subscription_rows step, which sets them to Stripe's status. If cause is "cancelled_unsynced", stop there: they cancelled in Stripe on purpose, so never bill them. Otherwise (they never paid), bill one month so they can pay to keep access. Find the user's Stripe customer through the app's customer mapping; if there is none, create one with stripe.Customer.create(email=<the user's email from the database>, metadata={"leakfinder_user_id": user_id}). Create the invoice first and attach the item to it (pending items are not pulled into new invoices automatically):
     inv = stripe.Invoice.create(customer=cus, collection_method="send_invoice", days_until_due=7, auto_advance=False, metadata={"leakfinder_user_id": user_id}, idempotency_key=...)
     stripe.InvoiceItem.create(customer=cus, invoice=inv.id, amount=monthly_cents, currency="usd", description="Pro plan, one month", idempotency_key=...)
     stripe.Invoice.finalize_invoice(inv.id, idempotency_key=...)
@@ -61,7 +69,10 @@ What to do per finding (in this order: pro_without_subscription, then payers_wit
 - stale_subscription_rows: set the app's subscription row status to stripe_status (and updated_at, if the table has it).
 
 Idempotency: the script may run twice, and the second run must change nothing.
-- Pass idempotency_key on every Stripe create, finalize and send call, derived from the object id: f"leakfinder-customer-{user_id}", f"leakfinder-invoice-{user_id}", f"leakfinder-invoiceitem-{user_id}", f"leakfinder-finalize-{user_id}", f"leakfinder-send-{user_id}", f"leakfinder-refund-{subscription_id}". Subscription.cancel is a DELETE, where keys have no effect, so check the status instead.
+- Pass idempotency_key on every Stripe create, finalize and send call, derived from a hash of the findings file and the object id. Stripe keeps a key for 24 hours and rejects it when it comes back with different parameters, and a re-seeded database has new Stripe customers under the same ids, so the key must change when the findings change and stay the same when this script re-runs on the same findings:
+    RUN = hashlib.sha256(open("${FINDINGS_PATH}", "rb").read()).hexdigest()[:12]
+    f"leakfinder-{RUN}-customer-{user_id}", f"leakfinder-{RUN}-invoice-{user_id}", f"leakfinder-{RUN}-invoiceitem-{user_id}", f"leakfinder-{RUN}-finalize-{user_id}", f"leakfinder-{RUN}-send-{user_id}", f"leakfinder-{RUN}-refund-{subscription_id}". Subscription.cancel is a DELETE, where keys have no effect, so check the status instead.
+- Never swallow a Stripe error with a bare except: let it fail the script, so a half-done apply is visible.
 - Also check state before each action, so a re-run days later is still a no-op: skip a user whose entitlement is already revoked; skip the invoice when stripe.Invoice.list(customer=cus, limit=100) already has one whose metadata leakfinder_user_id is that user; skip the refund when stripe.Refund.list(payment_intent=<id>) (or charge=<id>) already has one; skip the cancel when the subscription is already canceled; skip a row already at Stripe's status.
 - Do all database writes in one transaction, committed only when APPLY is true.
 
@@ -144,6 +155,26 @@ export function checkFindings(text: string | null): { findings: Findings } | { p
   if (missing.length) return { problem: `${FINDINGS_PATH} is missing the list(s) ${missing.join(", ")}` };
   if (!Number.isFinite(Number(raw.monthly_leak_cents))) return { problem: `${FINDINGS_PATH} has no numeric monthly_leak_cents` };
   return { findings: normalizeFindings(raw) };
+}
+
+/**
+ * Counts-only sanity checks on valid findings: a list that cannot be right on any schema. The message names
+ * counts, never a value, so it can go back to the model. The loop raises it once; a second pass is accepted.
+ */
+export function reconcileProblem(f: Findings): string | null {
+  const a = f.pro_without_subscription;
+  const problems: string[] = [];
+  const unpriced = a.filter((x) => !(x.monthly_cents > 0)).length;
+  if (unpriced) problems.push(`${unpriced} of the ${a.length} pro_without_subscription entries have monthly_cents 0; price each at its plan's monthly price`);
+  const dupes = a.length - new Set(a.map((x) => x.user_id)).size;
+  if (dupes) problems.push(`pro_without_subscription repeats ${dupes} user_id value${dupes === 1 ? "" : "s"}; list each paying entity once`);
+  const { app_pro_entitlements: e, stripe_active_subscriptions: s } = f.totals;
+  if (e > 0 && s > 0 && e - a.length !== s - f.payers_without_account.length) {
+    problems.push(
+      `the books do not balance: app_pro_entitlements ${e} - pro_without_subscription ${a.length} = ${e - a.length}, but stripe_active_subscriptions ${s} - payers_without_account ${f.payers_without_account.length} = ${s - f.payers_without_account.length}; check both sides count paying entities the same way`,
+    );
+  }
+  return problems.length ? problems.join("; ") : null;
 }
 
 /** The guard's work is a demo beat of its own: say what it removed before the model saw anything. */
@@ -249,6 +280,7 @@ export async function runAudit(
 
     const coder = (deps.coder ?? ((s, t) => new Coder(s, t)))(SYSTEM, transcript);
     let rewrites = 0;
+    let reconciled = false;
     for (let turn = 1; turn <= MAX_TURNS; turn++) {
       const reply = await coder.ask(prompt);
       const intent = intentLine(reply);
@@ -265,6 +297,16 @@ export async function runAudit(
       const a = await attempt(room, `${WORKDIR}/turn${turn}.py`, code);
       redacted += a.out.report.emailsRedacted;
       logGuard(log, `turn ${turn}`, a.out.report);
+      const off = a.ok && !reconciled && turn < MAX_TURNS ? reconcileProblem(a.findings) : null;
+      if (a.ok && off) {
+        reconciled = true;
+        rewrites++;
+        log(`turn ${turn}: exit 0 · ${secs(a.r)} · ${DONE} · counts do not reconcile → agent rewriting`);
+        prompt =
+          `Exit code 0 and ${FINDINGS_PATH} was written, but LeakFinder's counts-only check failed: ${off}. Output (guarded):\n\n${a.out.text}\n\n` +
+          `Re-read the definitions of the three lists, fix the audit, and send the corrected full script. If the counts are right for this schema, send the same script again and say why in your sentence.`;
+        continue;
+      }
       if (a.ok) {
         log(`turn ${turn}: exit 0 · ${secs(a.r)} · ${DONE} · findings.json valid (never shown to the model)`);
         if (fp) {
@@ -306,16 +348,26 @@ export function fixRuleGaps(code: string): string | null {
     /APPLY/.test(code) ? "" : "it never reads APPLY",
     /sk_test_/.test(code) && /rk_test_/.test(code) ? "" : "it does not refuse keys that are not sk_test_ or rk_test_",
     /idempotency_key/.test(code) ? "" : "its Stripe calls pass no idempotency_key",
+    /sha256/.test(code) ? "" : "its idempotency keys do not include the hash of the findings file (a key reused after a re-seed fails in Stripe)",
     code.includes(SUMMARY_MARKER) ? "" : `it never prints ${SUMMARY_MARKER}`,
   ].filter(Boolean);
   return gaps.length ? `rejected before running: ${gaps.join("; ")}` : null;
+}
+
+/**
+ * Run the fix.py already in the room with APPLY=0, through vm/dryrun.py: the script is not trusted to honour
+ * APPLY, so its non-GET Stripe requests are refused in-process and its Postgres sessions are read-only.
+ */
+export async function runDryRun(room: Pick<Room, "upload" | "runPython">): Promise<RunResult> {
+  await room.upload(DRYRUN_PATH, readFileSync(DRYRUN_SRC, "utf8"));
+  return room.runPython(DRYRUN_PATH, { APPLY: "0" });
 }
 
 async function dryRun(room: Room, code: string): Promise<FixRun> {
   const gap = fixRuleGaps(code);
   if (gap) return { r: { stdout: "", stderr: "", exit_code: 0, ms: 0 }, out: guard(""), plan: null, why: gap };
   await room.upload(FIX_PATH, code);
-  const r = await room.runPython(FIX_PATH, { APPLY: "0" });
+  const r = await runDryRun(room);
   const out = guard(`${r.stdout}\n${r.stderr}`.trim());
   const plan = parseSummary(r.stdout);
   let why: string | null = null;
@@ -405,7 +457,10 @@ export async function writeFix(
       return finish(code, run);
     }
     log(`fix draft ${turn}: exit ${run.r.exit_code} · ${secs(run.r)} · ${run.why} → agent rewriting`);
-    prompt = `Dry run failed: ${run.why}. Output (guarded):\n\n${run.out.text}\n\nFix it and send the corrected full script.`;
+    const readOnly = /DryRunWriteRefused|ReadOnlySqlTransaction|read-only transaction/.test(`${run.why} ${run.out.text}`)
+      ? " The dry run is read-only on both sides: gate each write on APPLY and keep every read in both modes, so the dry-run counts still match what APPLY does."
+      : "";
+    prompt = `Dry run failed: ${run.why}. Output (guarded):\n\n${run.out.text}\n\nFix it and send the corrected full script.${readOnly}`;
   }
   throw new Error(`could not produce a working fix script in ${FIX_TURNS} drafts`);
 }
