@@ -1,9 +1,39 @@
 {
   "name": "leakfinder",
   "version": "0.1.0",
-  "private": true,
-  "type": "module",
   "description": "Finds the money leaking between Stripe and your database. The agent writes the queries, runs them in a sealed CreateOS sandbox, and the model never sees a customer row.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Raj Karia",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rajkaria/leakfinder.git"
+  },
+  "homepage": "https://github.com/rajkaria/leakfinder#readme",
+  "keywords": [
+    "stripe",
+    "reconciliation",
+    "revenue-leak",
+    "ai-agent",
+    "sandbox",
+    "createos",
+    "postgres",
+    "billing"
+  ],
+  "bin": {
+    "leakfinder": "bin/leakfinder.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "vm/server.py",
+    "seed/schema.sql",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "lf": "tsx src/cli.ts",
     "check": "tsx src/cli.ts doctor",
@@ -17,7 +47,9 @@
     "spike": "tsx scripts/spike-sandbox.ts",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "down": "tsx src/cli.ts down"
+    "down": "tsx src/cli.ts down",
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "pnpm build && pnpm test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.135.0",
